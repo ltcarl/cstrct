@@ -3,13 +3,21 @@ import Credentials from 'next-auth/providers/credentials'
 import { prisma } from './db'
 import bcrypt from 'bcryptjs'
 
-export const { auth, signIn, signOut } = NextAuth({
+export const {
+  auth,
+  handlers: { GET, POST },   // <-- add this
+  signIn,
+  signOut,
+} = NextAuth({
   session: { strategy: 'jwt' },
   pages: { signIn: '/login' },
   providers: [
     Credentials({
       name: 'Credentials',
-      credentials: { email: { label: 'Email', type: 'email' }, password: { label: 'Password', type: 'password' } },
+      credentials: {
+        email: { label: 'Email', type: 'email' },
+        password: { label: 'Password', type: 'password' },
+      },
       authorize: async (creds) => {
         if (!creds?.email || !creds?.password) return null
         const user = await prisma.user.findUnique({ where: { email: creds.email } })
@@ -17,8 +25,8 @@ export const { auth, signIn, signOut } = NextAuth({
         const ok = await bcrypt.compare(creds.password, user.password)
         if (!ok) return null
         return { id: user.id, email: user.email, name: user.name, role: user.role }
-      }
-    })
+      },
+    }),
   ],
   callbacks: {
     async jwt({ token, user }) {
@@ -28,6 +36,6 @@ export const { auth, signIn, signOut } = NextAuth({
     async session({ session, token }) {
       if (session?.user) (session.user as any).role = token.role
       return session
-    }
-  }
+    },
+  },
 })
