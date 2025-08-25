@@ -34,11 +34,18 @@ export async function POST(
       projectId: params.projectId,
       sheetNumber,
       title,
-      discipline,
+      discipline,                          // must match your Prisma enum (e.g., 'HVAC', 'PLUMB', etc.)
       version: Number(version) || 1,
       fileKey,
       fileUrl,
       uploadedBy: userId,
+      // NEW:
+      ocrStatus: 'PENDING',
+      ocrSuggestedNumber: null,
+      ocrSuggestedTitle: null,
+      ocrSuggestedDisc: null,
+      ocrConfidence: null,
+      ocrRaw: null,
     },
   })
 
