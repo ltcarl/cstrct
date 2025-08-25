@@ -1,0 +1,90 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  PM
+  FOREMAN
+  SUBCONTRACTOR
+  VIEWER
+}
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String?
+  password  String   // bcrypt hash
+  role      Role     @default(VIEWER)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  memberships Membership[]
+}
+
+model Organization {
+  id        String   @id @default(cuid())
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  projects  Project[]
+  memberships Membership[]
+}
+
+model Membership {
+  id              String        @id @default(cuid())
+  userId          String
+  organizationId  String
+  role            Role          @default(VIEWER)
+  user            User          @relation(fields: [userId], references: [id])
+  organization    Organization  @relation(fields: [organizationId], references: [id])
+}
+
+model Project {
+  id             String    @id @default(cuid())
+  organizationId String
+  name           String
+  number         String?
+  address        String?
+  city           String?
+  state          String?
+  zip            String?
+  startDate      DateTime?
+  endDate        DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  plans          PlanSheet[]
+}
+
+enum Discipline {
+  ARCH
+  CIVIL
+  DEMO
+  ELEC
+  FP
+  HVAC
+  PLUMB
+  STRUC
+  TELE
+  OTHER
+}
+
+model PlanSheet {
+  id          String      @id @default(cuid())
+  projectId   String
+  sheetNumber String
+  title       String
+  discipline  Discipline
+  version     Int         @default(1)
+  fileKey     String      // S3 object key
+  fileUrl     String      // public URL
+  uploadedBy  String
+  createdAt   DateTime    @default(now())
+  project     Project     @relation(fields: [projectId], references: [id])
+  uploader    User        @relation(fields: [uploadedBy], references: [id])
+}
