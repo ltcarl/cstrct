@@ -42,12 +42,15 @@ export const {
   ],
   callbacks: {
     async jwt({ token, user }) {
-      if (user) token.role = (user as any).role;
-      return token;
+      if (user) token.role = (user as any).role
+      return token
     },
     async session({ session, token }) {
-      if (session?.user) (session.user as any).role = (token as any).role;
-      return session;
+      if (session?.user) {
+        (session.user as any).role = (token as any).role
+        ;(session.user as any).id = (token as any).sub   // <-- add this line
+      }
+      return session
     },
   },
 });

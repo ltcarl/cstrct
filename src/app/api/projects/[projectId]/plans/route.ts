@@ -1,30 +1,31 @@
 import { NextResponse } from 'next/server'
-import { prisma } from '@/lib/db'
 import { auth } from '@/lib/auth'
+import { prisma } from '@/lib/db'
 
-export async function GET(_: Request, { params }: { params: { projectId: string } }) {
+export async function POST(
+  req: Request,
+  { params }: { params: { projectId: string } }
+) {
   const session = await auth()
   if (!session?.user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  const plans = await prisma.planSheet.findMany({ where: { projectId: params.projectId }, orderBy: { createdAt: 'desc' } })
-  return NextResponse.json(plans)
-}
+  const userId = (session.user as any).id
+  if (!userId) return NextResponse.json({ error: 'No user id in session' }, { status: 401 })
 
-export async function POST(req: Request, { params }: { params: { projectId: string } }) {
-  const session = await auth()
-  if (!session?.user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  const { sheetNumber, title, discipline, version, fileKey, fileUrl } = await req.json()
-  if (!sheetNumber || !title || !discipline || !fileKey || !fileUrl) return NextResponse.json({ error: 'Missing fields' }, { status: 400 })
+  const body = await req.json()
+  const { sheetNumber, title, discipline, version, fileKey, fileUrl } = body
+
   const plan = await prisma.planSheet.create({
     data: {
       projectId: params.projectId,
       sheetNumber,
       title,
-      discipline,
+      discipline,                           // enum value from client
       version: Number(version) || 1,
       fileKey,
       fileUrl,
-      uploadedBy: (session.user as any).id,
-    }
+      uploadedBy: userId,                   // <-- key fix
+    },
   })
+
   return NextResponse.json(plan)
 }
