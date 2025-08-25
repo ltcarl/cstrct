@@ -122,7 +122,9 @@ export default function ProjectDetail() {
                     >
                       PDF
                     </button>
-                  </td>               
+                  </td>  
+                  <td className="p-2 border">{p.ocrStatus}</td>
+             
                 </tr>
               ))}
             </tbody>
