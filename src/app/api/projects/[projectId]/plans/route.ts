@@ -39,13 +39,7 @@ export async function POST(
       fileKey,
       fileUrl,
       uploadedBy: userId,
-      // NEW:
       ocrStatus: 'PENDING',
-      ocrSuggestedNumber: null,
-      ocrSuggestedTitle: null,
-      ocrSuggestedDisc: null,
-      ocrConfidence: null,
-      ocrRaw: null,
     },
   })
 
