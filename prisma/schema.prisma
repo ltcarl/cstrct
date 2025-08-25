@@ -15,6 +15,13 @@ enum Role {
   VIEWER
 }
 
+enum OcrStatus {
+  PENDING
+  RUNNING
+  DONE
+  FAILED
+}
+
 model User {
   id        String   @id @default(cuid())
   email     String   @unique
@@ -89,4 +96,10 @@ model PlanSheet {
   createdAt   DateTime    @default(now())
   project     Project     @relation(fields: [projectId], references: [id])
   uploader    User        @relation("UserUploadedPlans", fields: [uploadedBy], references: [id])
+  ocrStatus          OcrStatus   @default(PENDING)
+  ocrSuggestedNumber String?
+  ocrSuggestedTitle  String?
+  ocrSuggestedDisc   Discipline?
+  ocrConfidence      Float?
+  ocrRaw             Json?
 }
