@@ -97,7 +97,32 @@ export default function ProjectDetail() {
                   <td className="p-2 border">{p.discipline}</td>
                   <td className="p-2 border">{p.version}</td>
                   <td className="p-2 border">{new Date(p.createdAt).toLocaleString()}</td>
-                  <td className="p-2 border"><a className="underline" href={p.fileUrl} target="_blank">PDF</a></td>
+                  <td className="p-2 border">
+                    <button
+                      onClick={async () => {
+                        try {
+                          const res = await fetch('/api/files/sign-get', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            credentials: 'include',
+                            body: JSON.stringify({ key: p.fileKey }),
+                          })
+                          if (!res.ok) {
+                            alert('Failed to get signed link')
+                            return
+                          }
+                          const { url } = await res.json()
+                          window.open(url, '_blank')
+                        } catch (err) {
+                          console.error(err)
+                          alert('Error opening file')
+                        }
+                      }}
+                      className="text-blue-600 hover:underline"
+                    >
+                      PDF
+                    </button>
+                  </td>               
                 </tr>
               ))}
             </tbody>
