@@ -92,7 +92,9 @@ export async function POST(
       ws.on('error', reject)
     })
 
-   // 2) Try embedded text first (pdftotext – page 1)
+// ...above code unchanged (auth, download, etc.)
+
+// 2) Try embedded text first (pdftotext – page 1)
 let text = ''
 try {
   const { stdout } = await exec('pdftotext', ['-layout', '-f', '1', '-l', '1', pdfPath, '-'])
@@ -180,3 +182,15 @@ return NextResponse.json({
     confidence: updated.ocrConfidence,
   },
 })
+
+  } catch (err) {
+    console.error('OCR error:', err)
+    await prisma.planSheet.update({
+      where: { id: plan.id },
+      data: { ocrStatus: 'FAILED' },
+    })
+    return NextResponse.json({ error: 'OCR failed' }, { status: 500 })
+  } finally {
+    await rm(tmp, { recursive: true, force: true })
+  }
+}
