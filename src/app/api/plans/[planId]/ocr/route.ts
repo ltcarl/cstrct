@@ -322,13 +322,13 @@ export async function POST(req: Request, { params }: { params: { planId: string 
 
           // variant A: no threshold (clean grayscale)
           const prepNone = await makeNumberCropVariant(pngPath, numberRegion, {
-            threshold: null,          // no binarize
+            threshold: undefined,          // no binarize
             padPct: 0.12,             // outer pad
             innerTrimPct: 0.12,       // trim away inner edges to avoid borders
           })
           for (const psm of ['8', '7'] as const) {
             const raw = await tesseractNumber(prepNone, psm)
-            variants.push({ img: prepNone, psm, th: null, raw, picked: pickSheetNumber(raw) || null })
+            variants.push({ img: prepNone, psm, th: undefined, raw, picked: pickSheetNumber(raw) || null })
           }
 
           // variant B/C: binarized at two levels
