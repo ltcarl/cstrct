@@ -11,10 +11,52 @@ import { promisify } from 'node:util'
 import { execFile } from 'node:child_process'
 import { Discipline } from '@prisma/client'
 import sharp from 'sharp'
+import { randomUUID } from 'node:crypto'
 
 const exec = promisify(execFile)
 
 type Region = { xPct: number; yPct: number; wPct: number; hPct: number }
+
+// preprocess the crop: pad a bit, grayscale, normalize, binarize, upscale 2x
+async function prepareNumberCrop(pngPath: string, region: Region) {
+  const img = sharp(pngPath)
+  const meta = await img.metadata()
+  const W = meta.width || 0
+  const H = meta.height || 0
+
+  // add 8% padding around the region to avoid clipping last char
+  const pad = 0.08
+  const left  = Math.max(0, Math.floor((region.xPct - pad) * W))
+  const top   = Math.max(0, Math.floor((region.yPct - pad) * H))
+  const w     = Math.min(W - left, Math.floor((region.wPct + pad * 2) * W))
+  const h     = Math.min(H - top,  Math.floor((region.hPct + pad * 2) * H))
+
+  const out = `${pngPath.replace(/\.png$/, '')}-num-${randomUUID()}.png`
+
+  await sharp(pngPath)
+    .extract({ left, top, width: w, height: h })
+    .grayscale()
+    .normalize()                 // improve contrast
+    .threshold(180)             // binarize
+    .resize(w * 2, h * 2, {    // upscale 2x to help thin glyphs like '1'
+      kernel: 'lanczos3'
+    })
+    .toFile(out)
+
+  return out
+}
+
+async function tesseractStdout(imgPath: string, psm: '7'|'8') {
+  const args = [
+    imgPath, 'stdout',
+    '-l', 'eng',
+    '--oem', '1',
+    '--psm', psm,
+    '-c', 'tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-'
+  ]
+  const { stdout } = await exec('tesseract', args)
+  return (stdout || '').trim()
+}
 
 // Accepts IDs like: M1.01, P-101, FP101, A2.3, E-002, M-201A,
 // and also digit-first like: 68H01, 15P101, 1M101, 2A-03, 01G.02
@@ -188,19 +230,32 @@ export async function POST(req: Request, { params }: { params: { planId: string 
 
     // 1) Use saved regions first — with tuned PSM + whitelist
     let numText = ''
-    let titleText = ''
-
     const numberRegion = project?.ocrNumberRegion as Region | null
     if (numberRegion) {
       try {
-       // number is usually one line → PSM=7 with tight whitelist
-        numText = await ocrCropPng(pngPath, numberRegion, {
-          psm: '7',
-          whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-'
-        })
+        // preprocess the crop first (padding + binarize + 2x)
+        const numImg = await prepareNumberCrop(pngPath, numberRegion)
+    
+        // pass 1: single line (psm 7)
+        const pass1 = await tesseractStdout(numImg, '7')
+    
+        // pass 2: single word (psm 8) — often better for IDs like 68H01
+        const pass2 = await tesseractStdout(numImg, '8')
+    
+        // choose the pass that yields the stronger sheet number
+        const cand1 = pickSheetNumber(pass1) || ''
+        const cand2 = pickSheetNumber(pass2) || ''
+    
+        // scoring: prefer longer alnum strings, then the one that ends with a digit
+        const score = (s: string) =>
+          (s.replace(/[^A-Z0-9.-]/g, '').length) +
+          (/\d$/.test(s) ? 1 : 0)
+    
+        numText = score(cand2) > score(cand1) ? cand2 : cand1
       } catch {}
     }
 
+    let titleText = ''
     const titleRegion = project?.ocrTitleRegion as Region | null
     if (titleRegion) {
       try {
