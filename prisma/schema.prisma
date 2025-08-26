@@ -68,6 +68,16 @@ model Project {
   updatedAt      DateTime  @updatedAt
   organization   Organization @relation(fields: [organizationId], references: [id])
   plans          PlanSheet[]
+  ocrRegion      Json?       // e.g. {"xPct":0.70,"yPct":0.70,"wPct":0.28,"hPct":0.25}
+  ocrDpi         Int         @default(300)    // rasterization DPI for OCR
+  ocrCorner      OcrCorner   @default(BOTTOM_RIGHT)
+}
+
+enum OcrCorner {
+  BOTTOM_RIGHT
+  BOTTOM_LEFT
+  TOP_RIGHT
+  TOP_LEFT
 }
 
 enum Discipline {
