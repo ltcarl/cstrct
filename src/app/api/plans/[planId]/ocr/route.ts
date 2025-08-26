@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { execFile } from 'node:child_process'
+import { Discipline } from '@prisma/client'
 import sharp from 'sharp'
 
 const exec = promisify(execFile)
@@ -39,15 +40,18 @@ function pickTitle(text: string | undefined) {
   return (caps[0] || lines[0] || '').replace(/\s+/g, ' ').trim() || undefined
 }
 
-function guessDiscipline(number?: string, title?: string) {
+function guessDiscipline(number?: string, title?: string): Discipline | undefined {
   const hay = ((number || '') + ' ' + (title || '')).toLowerCase()
-  if (/(^|[^a-z])m\d|hvac/.test(hay)) return 'HVAC'
-  if (/\bp[-\d]|plumb|\bfp[-\d]/.test(hay)) return 'PLUMB'
-  if (/\be[-\d]|elec/.test(hay)) return 'ELEC'
-  if (/\ba[-\d]|arch/.test(hay)) return 'ARCH'
-  if (/\bs[-\d]|struct/.test(hay)) return 'STRUCT'
+
+  if (/(^|[^a-z])m\d|hvac/.test(hay)) return Discipline.HVAC
+  if (/\bp[-\d]|plumb|\bfp[-\d]/.test(hay)) return Discipline.PLUMB
+  if (/\be[-\d]|elec/.test(hay)) return Discipline.ELEC
+  if (/\ba[-\d]|arch/.test(hay)) return Discipline.ARCH
+  if (/\bs[-\d]|struct/.test(hay)) return Discipline.STRUC 
+
   return undefined
 }
+
 
 async function ocrCropPng(pngPath: string, region: Region) {
   const img = sharp(pngPath)
@@ -173,30 +177,30 @@ export async function POST(req: Request, { params }: { params: { planId: string 
       pickTitle(fullText) ||
       pickTitle(numText)
 
-    const disc = guessDiscipline(sheetNumber, title)
+      const disc = guessDiscipline(sheetNumber, title)
 
-    const combinedText = [numText, titleText, embeddedText || fullText].filter(Boolean).join('\n')
-    const confidence = Math.min(1, (combinedText.length / 2000) + (sheetNumber ? 0.25 : 0))
-
-    const updated = await prisma.planSheet.update({
-      where: { id: plan.id },
-      data: {
-        ocrStatus: 'DONE',
-        ocrSuggestedNumber: sheetNumber || undefined,
-        ocrSuggestedTitle: title || undefined,
-        ocrSuggestedDisc: disc,
-        ocrConfidence: confidence,
-        ocrRaw: {
-          lengths: {
-            numberRegion: numText.length,
-            titleRegion: titleText.length,
-            embedded: embeddedText.length,
-            full: fullText.length
-          },
-          previewDpi: dpi
-        } as any,
-      },
-    })
+      const combinedText = [numText, titleText, embeddedText || fullText].filter(Boolean).join('\n')
+      const confidence = Math.min(1, (combinedText.length / 2000) + (sheetNumber ? 0.25 : 0))
+      
+      const updated = await prisma.planSheet.update({
+        where: { id: plan.id },
+        data: {
+          ocrStatus: 'DONE',
+          ocrSuggestedNumber: sheetNumber || undefined,
+          ocrSuggestedTitle: title || undefined,
+          ocrSuggestedDisc: disc,   // now typed correctly
+          ocrConfidence: confidence,
+          ocrRaw: {
+            lengths: {
+              numberRegion: numText.length,
+              titleRegion: titleText.length,
+              embedded: embeddedText.length,
+              full: fullText.length
+            },
+            previewDpi: dpi
+          } as any,
+        },
+      })
 
     return NextResponse.json({
       ok: true,
