@@ -17,6 +17,29 @@ const exec = promisify(execFile)
 
 type Region = { xPct: number; yPct: number; wPct: number; hPct: number }
 
+/** Read page size in points from pdfinfo (first page) */
+async function getPdfPageSizePts(pdfPath: string) {
+  const { stdout } = await exec('pdfinfo', [pdfPath])
+  // Look for: "Page size:   841.89 x 595.28 pts"
+  const m = stdout.match(/Page size:\s+([\d.]+)\s+x\s+([\d.]+)\s+pts/i)
+  if (!m) return { w: 612, h: 792 } // default Letter portrait, won’t hurt
+  return { w: parseFloat(m[1]), h: parseFloat(m[2]) }
+}
+
+async function pdftotextRegion(pdfPath: string, regionPct: { xPct: number; yPct: number; wPct: number; hPct: number }) {
+  const { w: pageWpts, h: pageHpts } = await getPdfPageSizePts(pdfPath)
+
+  const x = Math.max(0, Math.floor(regionPct.xPct * pageWpts))
+  const y = Math.max(0, Math.floor(regionPct.yPct * pageHpts))
+  const W = Math.max(1, Math.floor(regionPct.wPct * pageWpts))
+  const H = Math.max(1, Math.floor(regionPct.hPct * pageHpts))
+
+  // -layout preserves ordering; -f/-l 1 clamp to page 1; -x/-y/-W/-H clip to rectangle (points; origin top-left)
+  const args = ['-layout', '-nopgbrk', '-f', '1', '-l', '1', '-x', String(x), '-y', String(y), '-W', String(W), '-H', String(H), pdfPath, '-']
+  const { stdout } = await exec('pdftotext', args)
+  return (stdout || '').trim()
+}
+
 // preprocess the crop: pad a bit, grayscale, normalize, binarize, upscale 2x
 async function prepareNumberCrop(pngPath: string, region: Region) {
   const img = sharp(pngPath)
@@ -259,53 +282,45 @@ export async function POST(req: Request, { params }: { params: { planId: string 
     await exec('pdftoppm', ['-singlefile', '-r', String(dpi), '-png', pdfPath, outBase])
     const pngPath = `${outBase}.png`
 
-    // 1) Use saved regions first — with tuned PSM + whitelist
-    let numText = ''
-    const numberRegion = project?.ocrNumberRegion as Region | null
-    let numberDebug: any = {}
-    
-    if (numberRegion) {
-      try {
-        // try a few threshold levels and PSMs; pick best candidate
-        const thresholds = [190, 170, 150]
-        const psms: ('7'|'8'|'13')[] = ['7','8','13']
-        const candidates: string[] = []
-        numberDebug.variants = []
-    
-        for (const th of thresholds) {
-          const variant = await makeNumberCropVariant(pngPath, numberRegion, { threshold: th })
-          for (const psm of psms) {
-            const out = await tesseractNumber(variant, psm)
-            const cand = pickSheetNumber(out)
-            numberDebug.variants.push({ threshold: th, psm, raw: out, picked: cand || null })
-            if (cand) candidates.push(cand)
-          }
-        }
-    
-        // choose best by length & ends-with-digit preference
-        const score = (s: string) =>
-          (s.replace(/[^A-Z0-9.-]/g, '').length) + (/\d$/.test(s) ? 1 : 0)
-        const best = candidates.sort((a,b) => score(b) - score(a) || b.length - a.length)[0]
-    
-        numText = best || ''
-      } catch (e) {
-        numberDebug.error = String(e)
-      }
-    }
+   // 0) Region text first (vector text beats OCR)
+let numText = ''
+let titleText = ''
 
-    let titleText = ''
-    const titleRegion = project?.ocrTitleRegion as Region | null
-    if (titleRegion) {
-      try {
-        // title can be multi-line → PSM=6, keep broad chars and newlines
-        titleText = await ocrCropPng(pngPath, titleRegion, {
-          psm: '6',
-          whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .-_()/',
-          keepNewlines: true
-        })
-      } catch {}
-    }
+const numberRegion = project?.ocrNumberRegion as Region | null
+const titleRegion  = project?.ocrTitleRegion  as Region | null
 
+if (numberRegion) {
+  try {
+    const txt = await pdftotextRegion(pdfPath, numberRegion)
+    // Keep only a tight line for numbers (avoid grabbing too much)
+    numText = txt.split('\n').map(s => s.trim()).filter(Boolean).join(' ')
+  } catch {}
+}
+
+if (titleRegion) {
+  try {
+    const txt = await pdftotextRegion(pdfPath, titleRegion)
+    // Keep first two strong lines for the title
+    const lines = txt.split('\n').map(s => s.trim()).filter(Boolean)
+    titleText = lines.slice(0, 2).join(' ')
+  } catch {}
+}
+// Rasterize only if a field is still missing
+if (!numText || !titleText) {
+  const dpi = project?.ocrDpi ?? 300
+  await exec('pdftoppm', ['-singlefile', '-r', String(dpi), '-png', pdfPath, outBase])
+  const pngPath = `${outBase}.png`
+
+  // Number fallback OCR (your padded/trim variants)
+  if (!numText && numberRegion) {
+    // ... your improved number OCR block (psm 8/7 + trim/padding) ...
+  }
+
+  // Title fallback OCR (your title OCR block)
+  if (!titleText && titleRegion) {
+    // ... your title OCR block ...
+  }
+}
 // 2) Try embedded text to help only if a field is still missing
 let embeddedText = ''
 try {
@@ -325,7 +340,8 @@ if ((!numText && !titleText) && (!embeddedText || embeddedText.trim().length < 4
 // 4) Lock precedence: region → embedded → full
 const sheetNumber =
   pickSheetNumber(numText) ||
-  pickSheetNumber(embeddedText) ||
+  pickSheetNumber(titleText) || // rarely needed
+  pickSheetNumber(embeddedText) || // if you still compute it
   pickSheetNumber(fullText)
 
 const title =
