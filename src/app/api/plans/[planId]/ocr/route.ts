@@ -40,35 +40,6 @@ async function pdftotextRegion(pdfPath: string, regionPct: { xPct: number; yPct:
   return (stdout || '').trim()
 }
 
-// preprocess the crop: pad a bit, grayscale, normalize, binarize, upscale 2x
-async function prepareNumberCrop(pngPath: string, region: Region) {
-  const img = sharp(pngPath)
-  const meta = await img.metadata()
-  const W = meta.width || 0
-  const H = meta.height || 0
-
-  // add 8% padding around the region to avoid clipping last char
-  const pad = 0.08
-  const left = Math.max(0, Math.floor((region.xPct - pad) * W))
-  const top = Math.max(0, Math.floor((region.yPct - pad) * H))
-  const w = Math.min(W - left, Math.floor((region.wPct + pad * 2) * W))
-  const h = Math.min(H - top, Math.floor((region.hPct + pad * 2) * H))
-
-  const out = `${pngPath.replace(/\.png$/, '')}-num-${randomUUID()}.png`
-
-  await sharp(pngPath)
-    .extract({ left, top, width: w, height: h })
-    .grayscale()
-    .normalize()                 // improve contrast
-    .threshold(180)             // binarize
-    .resize(w * 2, h * 2, {    // upscale 2x to help thin glyphs like '1'
-      kernel: 'lanczos3'
-    })
-    .toFile(out)
-
-  return out
-}
-
 async function makeNumberCropVariant(
   pngPath: string,
   region: { xPct: number; yPct: number; wPct: number; hPct: number },
@@ -140,18 +111,6 @@ async function tesseractNumber(imgPath: string, psm: PSM = '8'): Promise<string>
   return (stdout || '').trim()
 }
 
-async function tesseractStdout(imgPath: string, psm: '7' | '8') {
-  const args = [
-    imgPath, 'stdout',
-    '-l', 'eng',
-    '--oem', '1',
-    '--psm', psm,
-    '-c', 'tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-'
-  ]
-  const { stdout } = await exec('tesseract', args)
-  return (stdout || '').trim()
-}
-
 // Accept more formats incl. digit-first like 68H01
 function pickSheetNumber(text?: string) {
   if (!text) return undefined
@@ -216,6 +175,18 @@ function guessDiscipline(number?: string, title?: string): Discipline | undefine
   if (/\bs[-\d]|struct/.test(hay)) return Discipline.STRUC
 
   return undefined
+}
+
+function fixO0(token: string) {
+  let t = token.toUpperCase();
+
+  // If an 'O' is between digits, it's almost certainly a zero (68H O 1 -> 68H 0 1)
+  t = t.replace(/(?<=\d)O(?=\d)/g, '0');
+
+  // If a '0' is between letters, it's often the letter O (rare but safe)
+  t = t.replace(/(?<=[A-Z])0(?=[A-Z])/g, 'O');
+
+  return t;
 }
 
 async function ocrCropPng(
@@ -308,159 +279,135 @@ export async function POST(req: Request, { params }: { params: { planId: string 
       ws.on('error', reject)
     })
 
-    // Always rasterize so we can use regions
-    const dpi = project?.ocrDpi ?? 300
-    await exec('pdftoppm', ['-singlefile', '-r', String(dpi), '-png', pdfPath, outBase])
-    const pngPath = `${outBase}.png`
-
-    // 0) Region text first (vector text beats OCR)
+    // ---------- 1) Region text first (no rasterization) ----------
     let numText = ''
     let titleText = ''
-
+    let usedNumberRegionText = false
+    let usedTitleRegionText = false
     let numberDebug: any = { variants: [] as any[] }
 
     const numberRegion = project?.ocrNumberRegion as Region | null
-    const titleRegion = project?.ocrTitleRegion as Region | null
+    const titleRegion  = project?.ocrTitleRegion  as Region | null
 
     if (numberRegion) {
       try {
         const txt = await pdftotextRegion(pdfPath, numberRegion)
-        // Keep only a tight line for numbers (avoid grabbing too much)
-        numText = txt.split('\n').map(s => s.trim()).filter(Boolean).join(' ')
-      } catch { }
+        const tight = txt.split('\n').map(s => s.trim()).filter(Boolean).join(' ')
+        if (tight) { numText = tight; usedNumberRegionText = true }
+      } catch {}
     }
 
     if (titleRegion) {
       try {
         const txt = await pdftotextRegion(pdfPath, titleRegion)
-        // Keep first two strong lines for the title
         const lines = txt.split('\n').map(s => s.trim()).filter(Boolean)
-        titleText = lines.slice(0, 2).join(' ')
-      } catch { }
+        if (lines.length) { titleText = lines.slice(0, 2).join(' '); usedTitleRegionText = true }
+      } catch {}
     }
-    // Rasterize only if a field is still missing
+
+    // ---------- 2) Rasterize only if a field is still missing ----------
     if (!numText || !titleText) {
       const dpi = project?.ocrDpi ?? 300
       await exec('pdftoppm', ['-singlefile', '-r', String(dpi), '-png', pdfPath, outBase])
-      const pngPath = `${outBase}.png`
 
-      // ---------- NUMBER: OCR fallback (robust) ----------
+      // NUMBER: OCR fallback (robust)
       if (!numText && numberRegion) {
         try {
-          const variants: {
-            img: string; psm: '7' | '8'; th: number | null; raw: string; picked: string | null
-          }[] = []
+          const variants: { img: string; psm: '7'|'8'; th: number|null; raw: string; picked: string|null }[] = []
 
-          // variant A: no threshold (clean grayscale)
+          // no-threshold
           const prepNone = await makeNumberCropVariant(pngPath, numberRegion, {
-            threshold: undefined,          // no binarize
-            padPct: 0.12,             // outer pad
-            innerTrimPct: 0.12,       // trim away inner edges to avoid borders
+            threshold: undefined, padPct: 0.12, innerTrimPct: 0.12,
           })
-          for (const psm of ['8', '7'] as const) {
+          for (const psm of ['8','7'] as const) {
             const raw = await tesseractNumber(prepNone, psm)
             variants.push({ img: prepNone, psm, th: null, raw, picked: pickSheetNumber(raw) || null })
           }
 
-          // variant B/C: binarized at two levels
+          // binarized variants
           for (const th of [190, 170]) {
             const prepTh = await makeNumberCropVariant(pngPath, numberRegion, {
-              threshold: th,
-              padPct: 0.12,
-              innerTrimPct: 0.12,
+              threshold: th, padPct: 0.12, innerTrimPct: 0.12,
             })
-            for (const psm of ['8', '7'] as const) {
+            for (const psm of ['8','7'] as const) {
               const raw = await tesseractNumber(prepTh, psm)
               variants.push({ img: prepTh, psm, th, raw, picked: pickSheetNumber(raw) || null })
             }
           }
 
-          // choose best candidate
           const score = (s: string) =>
             s.replace(/[^A-Z0-9.-]/g, '').length + (/\d$/.test(s) ? 1 : 0)
 
-          const best =
+          numText =
             variants
               .map(v => v.picked)
               .filter((v): v is string => !!v)
-              .sort((a, b) => score(b) - score(a) || b.length - a.length)[0] || ''
+              .sort((a,b) => score(b) - score(a) || b.length - a.length)[0] || ''
 
-          numText = best
           numberDebug.variants = variants
         } catch (e) {
           numberDebug.error = String(e)
         }
       }
 
-      // Title fallback OCR (your title OCR block)
+      // TITLE: OCR fallback (simple block)
       if (!titleText && titleRegion) {
         try {
-          // Render once, crop the title area, OCR as a block (keep newlines)
-          // Simple version using tesseract directly over the full page + region crop helper:
-          // If you have ocrCropPng(region, { psm:'6', whitelist:, keepNewlines:true }) keep it.
-          // Here we do it with sharp then tesseract:
-
-          // Reuse the number-crop maker shape but without innerTrim; titles are away from borders
           const img = sharp(pngPath)
           const meta = await img.metadata()
           const W = meta.width || 0
           const H = meta.height || 0
-          const left = Math.max(0, Math.floor(titleRegion.xPct * W))
-          const top = Math.max(0, Math.floor(titleRegion.yPct * H))
-          const width = Math.min(W - left, Math.floor(titleRegion.wPct * W))
-          const height = Math.min(H - top, Math.floor(titleRegion.hPct * H))
+          const left   = Math.max(0, Math.floor(titleRegion.xPct * W))
+          const top    = Math.max(0, Math.floor(titleRegion.yPct * H))
+          const width  = Math.min(W - left, Math.floor(titleRegion.wPct * W))
+          const height = Math.min(H - top,  Math.floor(titleRegion.hPct * H))
           const titleCrop = `${pngPath.replace(/\.png$/, '')}-title.png`
 
           await sharp(pngPath)
             .extract({ left, top, width, height })
-            .grayscale()
-            .normalize()
-            .gamma(1.05)
+            .grayscale().normalize().gamma(1.05)
             .resize(width * 2, height * 2, { kernel: 'lanczos3' })
             .toFile(titleCrop)
 
           const { stdout } = await exec('tesseract', [
             titleCrop, 'stdout',
-            '-l', 'eng',
-            '--oem', '1',
-            '--psm', '6', // block of text
-            '-c', 'tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .-_()/'
+            '-l', 'eng', '--oem', '1', '--psm', '6',
+            '-c', 'tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .-_()/' // basic punctuation
           ])
 
-          // Join the top 2 strongest lines
           const lines = (stdout || '')
-            .split('\n')
-            .map(s => s.trim())
-            .filter(Boolean)
+            .split('\n').map(s => s.trim()).filter(Boolean)
             .filter(l => /^[A-Z0-9 .\-_/()]+$/.test(l))
+
           titleText = (lines.slice(0, 2).join(' ') || '').trim()
-        } catch {
-          // ignore — title stays empty, later fallbacks (embedded/full) may fill it
-        }
+        } catch {}
       }
     }
-    // 2) Try embedded text to help only if a field is still missing
+
+    // ---------- 3) Extra signals (optional) ----------
     let embeddedText = ''
     try {
       const { stdout } = await exec('pdftotext', ['-layout', '-f', '1', '-l', '1', pdfPath, '-'])
       embeddedText = stdout || ''
-    } catch { }
+    } catch {}
 
-    // 3) Full-page OCR only if *both* are missing and embedded text is weak
     let fullText = ''
     if ((!numText && !titleText) && (!embeddedText || embeddedText.trim().length < 40)) {
-      const { stdout } = await exec('tesseract', [
-        pngPath, 'stdout', '-l', 'eng', '--oem', '1', '--psm', '6'
-      ])
+      const { stdout } = await exec('tesseract', [pngPath, 'stdout', '-l', 'eng', '--oem', '1', '--psm', '6'])
       fullText = stdout || ''
     }
 
-    // 4) Lock precedence: region → embedded → full
-    const sheetNumber =
+    // O/0 disambiguation on the number text before picking
+    if (numText) numText = fixO0(numText)
+
+    // ---------- 4) Final suggestion selection ----------
+    let sheetNumber =
       pickSheetNumber(numText) ||
-      pickSheetNumber(titleText) || // rarely needed
-      pickSheetNumber(embeddedText) || // if you still compute it
+      pickSheetNumber(titleText) ||
+      pickSheetNumber(embeddedText) ||
       pickSheetNumber(fullText)
+
+    if (sheetNumber) sheetNumber = fixO0(sheetNumber)
 
     const title =
       pickTitleFromRegion(titleText) ||
@@ -485,9 +432,9 @@ export async function POST(req: Request, { params }: { params: { planId: string 
             numberRegion: numText.length,
             titleRegion: titleText.length,
             embedded: embeddedText.length,
-            full: fullText.length
+            full: fullText.length,
           },
-          previewDpi: dpi
+          previewDpi: project?.ocrDpi ?? 300,
         } as any,
       },
     })
@@ -501,17 +448,23 @@ export async function POST(req: Request, { params }: { params: { planId: string 
         confidence: updated.ocrConfidence,
       },
       debug: {
-        numberOCR: numberDebug,   // <- declared earlier: let numberDebug: any = { variants: [] }
+        numberOCR: numberDebug,
+        usedNumberRegionText,
+        usedTitleRegionText,
+        lengths: {
+          numRegion: numText?.length || 0,
+          titleRegion: titleText?.length || 0,
+        },
       },
-    });
+    })
   } catch (err) {
-    console.error('OCR error:', err);
+    console.error('OCR error:', err)
     await prisma.planSheet.update({
       where: { id: plan.id },
       data: { ocrStatus: 'FAILED' },
-    });
-    return NextResponse.json({ error: 'OCR failed' }, { status: 500 });
+    })
+    return NextResponse.json({ error: 'OCR failed' }, { status: 500 })
   } finally {
-    await rm(tmp, { recursive: true, force: true });
+    await rm(tmp, { recursive: true, force: true })
   }
 }
