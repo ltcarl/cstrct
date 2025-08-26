@@ -489,3 +489,4 @@ export async function POST(req: Request, { params }: { params: { planId: string 
     } finally {
       await rm(tmp, { recursive: true, force: true });
     }
+  }
