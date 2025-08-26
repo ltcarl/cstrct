@@ -202,6 +202,22 @@ export default function OcrEditorPage({ params }: { params: { id: string } }) {
         >
           Run OCR on this Plan
         </button>
+        <button
+  onClick={() => {
+    if (!planId) return
+    window.open(`/projects/${projectId}/ocr/inspect?planId=${planId}`, '_blank')
+  }}
+  className="px-3 py-1.5 rounded border hover:bg-gray-50"
+>
+  View OCR Crops
+</button>
+
+<button
+  onClick={runOcr}
+  className="px-3 py-1.5 rounded bg-black text-white hover:opacity-90"
+>
+  Run OCR on this Plan
+</button>
       </div>
 
       <div ref={containerRef} className="relative inline-block border rounded overflow-hidden">
