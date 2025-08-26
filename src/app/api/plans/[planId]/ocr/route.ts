@@ -17,6 +17,78 @@ const exec = promisify(execFile)
 
 type Region = { xPct: number; yPct: number; wPct: number; hPct: number }
 
+async function getPdfPageInfo(pdfPath: string) {
+  const { stdout } = await exec('pdfinfo', [pdfPath])
+  const size = stdout.match(/Page size:\s+([\d.]+)\s+x\s+([\d.]+)\s+pts/i)
+  // Poppler prints rotation as either “Page rot:” or “Rotate:”
+  const rot  = stdout.match(/Page rot:\s+(\d+)/i) || stdout.match(/Rotate:\s+(\d+)/i)
+
+  return {
+    w: size ? parseFloat(size[1]) : 612,
+    h: size ? parseFloat(size[2]) : 792,
+    rot: (rot ? parseInt(rot[1], 10) : 0) as 0 | 90 | 180 | 270,
+  }
+}
+
+function mapRegionForRotation(
+  x: number, y: number, W: number, H: number,
+  pageW: number, pageH: number, rot: 0 | 90 | 180 | 270
+) {
+  switch (rot) {
+    case 0:
+      return { x, y, W, H }
+    case 90:
+      // (x, y, W, H) in unrotated space -> (x', y') in 90° page space
+      return { x: pageH - (y + H), y: x, W: H, H: W }
+    case 180:
+      return { x: pageW - (x + W), y: pageH - (y + H), W, H }
+    case 270:
+      return { x: y, y: pageW - (x + W), W: H, H: W }
+  }
+}
+
+export async function pdftotextRegion(pdfPath: string, r: RegionPct) {
+  const { w: pageW, h: pageH, rot } = await getPdfPageInfo(pdfPath)
+
+  // Region in points in *unrotated* page space
+  const x0 = Math.max(0, Math.floor(r.xPct * pageW))
+  const y0 = Math.max(0, Math.floor(r.yPct * pageH))
+  const W0 = Math.max(1, Math.floor(r.wPct * pageW))
+  const H0 = Math.max(1, Math.floor(r.hPct * pageH))
+
+  // Remap to pdftotext’s expected (rotated) page coordinate system
+  const { x, y, W, H } = mapRegionForRotation(x0, y0, W0, H0, pageW, pageH, rot)
+
+  const args = [
+    '-layout', '-nopgbrk',
+    '-f', '1', '-l', '1',
+    '-x', String(x), '-y', String(y),
+    '-W', String(W), '-H', String(H),
+    pdfPath, '-',
+  ]
+  const { stdout } = await exec('pdftotext', args)
+  return (stdout || '').trim()
+}
+
+async function pdftotextRegion(pdfPath: string, r: RegionPct) {
+  const { w: pageW, h: pageH, rot } = await getPdfPageInfo(pdfPath)
+
+  // region → points in *unrotated* page space
+  const x0 = Math.max(0, Math.floor(r.xPct * pageW))
+  const y0 = Math.max(0, Math.floor(r.yPct * pageH))
+  const W0 = Math.max(1, Math.floor(r.wPct * pageW))
+  const H0 = Math.max(1, Math.floor(r.hPct * pageH))
+
+  // remap for rotated page
+  const { x, y, W, H } = mapRegionForRotation(x0, y0, W0, H0, pageW, pageH, rot)
+
+  const args = ['-layout', '-nopgbrk', '-f', '1', '-l', '1',
+                '-x', String(x), '-y', String(y), '-W', String(W), '-H', String(H),
+                pdfPath, '-']
+  const { stdout } = await exec('pdftotext', args)
+  return (stdout || '').trim()
+}
+
 /** Read page size in points from pdfinfo (first page) */
 async function getPdfPageSizePts(pdfPath: string) {
   const { stdout } = await exec('pdfinfo', [pdfPath])
