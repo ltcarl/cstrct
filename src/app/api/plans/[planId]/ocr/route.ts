@@ -319,7 +319,7 @@ export async function POST(req: Request, { params }: { params: { planId: string 
           const prepNone = await makeNumberCropVariant(pngPath, numberRegion, {
             threshold: undefined, padPct: 0.12, innerTrimPct: 0.12,
           })
-          for (const psm of ['8','7'] as const) {
+          for (const psm of ['7'] as const) {
             const raw = await tesseractNumber(prepNone, psm)
             variants.push({ img: prepNone, psm, th: null, raw, picked: pickSheetNumber(raw) || null })
           }
@@ -329,7 +329,7 @@ export async function POST(req: Request, { params }: { params: { planId: string 
             const prepTh = await makeNumberCropVariant(pngPath, numberRegion, {
               threshold: th, padPct: 0.12, innerTrimPct: 0.12,
             })
-            for (const psm of ['8','7'] as const) {
+            for (const psm of ['7'] as const) {
               const raw = await tesseractNumber(prepTh, psm)
               variants.push({ img: prepTh, psm, th, raw, picked: pickSheetNumber(raw) || null })
             }
