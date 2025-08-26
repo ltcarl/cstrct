@@ -119,14 +119,23 @@ async function makeNumberCropVariant(
   return outPath
 }
 
-async function tesseractNumber(imgPath: string, psm: '7' | '8' | '13') {
+type PSM = '7' | '8'
+async function tesseractNumber(imgPath: string, psm: PSM = '8'): Promise<string> {
   const args = [
     imgPath, 'stdout',
     '-l', 'eng',
-    '--oem', '1',
+    '--oem', '3',                // LSTM+legacy (more robust on codes)
     '--psm', psm,
-    '-c', 'tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-'
+    // Turn off dictionaries; treat as code, not a word
+    '-c', 'load_system_dawg=0',
+    '-c', 'load_freq_dawg=0',
+    // Alphanumeric + common separators for sheet ids
+    '-c', 'tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-',
+    // Prefer numeric layout; keep spacing if any
+    '-c', 'classify_bln_numeric_mode=1',
+    '-c', 'preserve_interword_spaces=1',
   ]
+
   const { stdout } = await exec('tesseract', args)
   return (stdout || '').trim()
 }
