@@ -286,6 +286,8 @@ export async function POST(req: Request, { params }: { params: { planId: string 
 let numText = ''
 let titleText = ''
 
+let numberDebug: any = { variants: [] as any[] }
+
 const numberRegion = project?.ocrNumberRegion as Region | null
 const titleRegion  = project?.ocrTitleRegion  as Region | null
 
@@ -312,13 +314,104 @@ if (!numText || !titleText) {
   const pngPath = `${outBase}.png`
 
   // Number fallback OCR (your padded/trim variants)
+if (!numText || !titleText) {
+  const dpi = project?.ocrDpi ?? 300
+  await exec('pdftoppm', ['-singlefile', '-r', String(dpi), '-png', pdfPath, outBase])
+  const pngPath = `${outBase}.png`
+
+  // ---------- NUMBER: OCR fallback (robust) ----------
   if (!numText && numberRegion) {
-    // ... your improved number OCR block (psm 8/7 + trim/padding) ...
+    try {
+      const variants: {
+        img: string; psm: '7'|'8'; th: number|null; raw: string; picked: string|null
+      }[] = []
+
+      // variant A: no threshold (clean grayscale)
+      const prepNone = await makeNumberCropVariant(pngPath, numberRegion, {
+        threshold: null,          // no binarize
+        padPct: 0.12,             // outer pad
+        innerTrimPct: 0.12,       // trim away inner edges to avoid borders
+      })
+      for (const psm of ['8','7'] as const) {
+        const raw = await tesseractNumber(prepNone, psm)
+        variants.push({ img: prepNone, psm, th: null, raw, picked: pickSheetNumber(raw) || null })
+      }
+
+      // variant B/C: binarized at two levels
+      for (const th of [190, 170]) {
+        const prepTh = await makeNumberCropVariant(pngPath, numberRegion, {
+          threshold: th,
+          padPct: 0.12,
+          innerTrimPct: 0.12,
+        })
+        for (const psm of ['8','7'] as const) {
+          const raw = await tesseractNumber(prepTh, psm)
+          variants.push({ img: prepTh, psm, th, raw, picked: pickSheetNumber(raw) || null })
+        }
+      }
+
+      // choose best candidate
+      const score = (s: string) =>
+        s.replace(/[^A-Z0-9.-]/g, '').length + (/\d$/.test(s) ? 1 : 0)
+
+      const best =
+        variants
+          .map(v => v.picked)
+          .filter((v): v is string => !!v)
+          .sort((a,b) => score(b) - score(a) || b.length - a.length)[0] || ''
+
+      numText = best
+      numberDebug.variants = variants
+    } catch (e) {
+      numberDebug.error = String(e)
+    }
   }
 
   // Title fallback OCR (your title OCR block)
-  if (!titleText && titleRegion) {
-    // ... your title OCR block ...
+ if (!titleText && titleRegion) {
+    try {
+      // Render once, crop the title area, OCR as a block (keep newlines)
+      // Simple version using tesseract directly over the full page + region crop helper:
+      // If you have ocrCropPng(region, { psm:'6', whitelist:, keepNewlines:true }) keep it.
+      // Here we do it with sharp then tesseract:
+
+      // Reuse the number-crop maker shape but without innerTrim; titles are away from borders
+      const img = sharp(pngPath)
+      const meta = await img.metadata()
+      const W = meta.width || 0
+      const H = meta.height || 0
+      const left  = Math.max(0, Math.floor(titleRegion.xPct * W))
+      const top   = Math.max(0, Math.floor(titleRegion.yPct * H))
+      const width = Math.min(W - left, Math.floor(titleRegion.wPct * W))
+      const height= Math.min(H - top,  Math.floor(titleRegion.hPct * H))
+      const titleCrop = `${pngPath.replace(/\.png$/, '')}-title.png`
+
+      await sharp(pngPath)
+        .extract({ left, top, width, height })
+        .grayscale()
+        .normalize()
+        .gamma(1.05)
+        .resize(width * 2, height * 2, { kernel: 'lanczos3' })
+        .toFile(titleCrop)
+
+      const { stdout } = await exec('tesseract', [
+        titleCrop, 'stdout',
+        '-l', 'eng',
+        '--oem', '1',
+        '--psm', '6', // block of text
+        '-c', 'tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .-_()/'
+      ])
+
+      // Join the top 2 strongest lines
+      const lines = (stdout || '')
+        .split('\n')
+        .map(s => s.trim())
+        .filter(Boolean)
+        .filter(l => /^[A-Z0-9 .\-_/()]+$/.test(l))
+      titleText = (lines.slice(0, 2).join(' ') || '').trim()
+    } catch {
+      // ignore — title stays empty, later fallbacks (embedded/full) may fill it
+    }
   }
 }
 // 2) Try embedded text to help only if a field is still missing
