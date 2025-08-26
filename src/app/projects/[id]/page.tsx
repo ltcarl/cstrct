@@ -43,7 +43,7 @@ export default function ProjectPlansPage() {
       })
 
       // 3) Create plan record (no manual fields)
-      const created = await fetch(`/api/projects/${projectId}/plans`, {
+      const createRes = await fetch(`/api/projects/${projectId}/plans`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
@@ -51,9 +51,15 @@ export default function ProjectPlansPage() {
           fileKey: presign.key,
           fileUrl: presign.publicUrl,
         }),
-      }).then((r) => r.json())
+      })
 
-      // 4) Go straight to the per-sheet review
+      if (!createRes.ok) {
+        // read text so you can see server error
+        const errText = await createRes.text()
+        throw new Error(errText || `Create failed (${createRes.status})`)
+      }
+
+      const created = await createRes.json() // { id: string, ... }
       router.push(`/plans/${created.id}/review`)
     } catch (err) {
       console.error(err)

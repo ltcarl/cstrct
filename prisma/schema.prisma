@@ -98,12 +98,12 @@ enum Discipline {
 model PlanSheet {
   id          String      @id @default(cuid())
   projectId   String
-  sheetNumber String
-  title       String
-  discipline  Discipline
+  sheetNumber String?
+  title       String?
+  discipline  Discipline?
   version     Int         @default(1)
   fileKey     String      // S3 object key
-  fileUrl     String      // public URL
+  fileUrl     String?      // public URL
   uploadedBy  String
   createdAt   DateTime    @default(now())
   project     Project     @relation(fields: [projectId], references: [id])
