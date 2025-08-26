@@ -111,6 +111,66 @@ async function tesseractNumber(imgPath: string, psm: PSM = '8'): Promise<string>
   return (stdout || '').trim()
 }
 
+// Rotate an existing PNG crop and OCR it, returning raw text
+async function ocrRotated(
+  imgPath: string,
+  angle: 0 | 90 | 270,
+  opts?: { psm?: '6' | '7'; whitelist?: string }
+) {
+  const rotated = angle === 0 ? imgPath : `${imgPath.replace(/\.png$/, '')}-rot${angle}.png`
+  if (angle !== 0) {
+    await sharp(imgPath).rotate(angle).toFile(rotated)
+  }
+  const args = [
+    rotated, 'stdout',
+    '-l', 'eng',
+    '--oem', '1',
+    '--psm', opts?.psm ?? '6',
+  ]
+  if (opts?.whitelist) args.push('-c', `tessedit_char_whitelist=${opts.whitelist}`)
+  const { stdout } = await exec('tesseract', args)
+  return (stdout || '').trim()
+}
+
+// Score title text: prefer more valid lines & longer text
+function scoreTitleText(t: string) {
+  const lines = t.split('\n').map(s => s.trim()).filter(Boolean)
+  const valid = lines.filter(l => /^[A-Z0-9 .\-_/()]+$/.test(l))
+  const length = valid.join(' ').length
+  return valid.length * 50 + length // weight line count heavily
+}
+
+// Run OCR on a crop at 0/90/270 and return the best text + angle
+async function ocrTitleAnyOrientation(cropPath: string) {
+  const candidates: Array<{ angle: 0 | 90 | 270; text: string; score: number }> = []
+  for (const angle of [0, 90, 270] as const) {
+    const text = await ocrRotated(cropPath, angle, { psm: '6' })
+    candidates.push({ angle, text, score: scoreTitleText(text) })
+  }
+  candidates.sort((a, b) => b.score - a.score)
+  return candidates[0] // { angle, text, score }
+}
+
+// Similar helper for sheet numbers (single line, whitelist)
+async function ocrNumberAnyOrientation(cropPath: string) {
+  const whitelist = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-'
+  const variants: Array<{ angle: 0 | 90 | 270; psm: '7' | '8'; raw: string }> = []
+  for (const angle of [0, 90, 270] as const) {
+    for (const psm of ['7', '8'] as const) {
+      const raw = await ocrRotated(cropPath, angle, { psm, whitelist })
+      variants.push({ angle, psm, raw })
+    }
+  }
+  // pick using existing pickSheetNumber + length
+  const ranked = variants
+    .map(v => ({ ...v, picked: pickSheetNumber(v.raw) || '' }))
+    .sort((a, b) =>
+      (b.picked.length - a.picked.length) ||
+      (a.psm === '7' ? -1 : 1) // prefer PSM7 if tie
+    )
+  return ranked[0] // { angle, psm, raw, picked }
+}
+
 // Accept more formats incl. digit-first like 68H01
 function pickSheetNumber(text?: string) {
   if (!text) return undefined
@@ -287,14 +347,14 @@ export async function POST(req: Request, { params }: { params: { planId: string 
     let numberDebug: any = { variants: [] as any[] }
 
     const numberRegion = project?.ocrNumberRegion as Region | null
-    const titleRegion  = project?.ocrTitleRegion  as Region | null
+    const titleRegion = project?.ocrTitleRegion as Region | null
 
     if (numberRegion) {
       try {
         const txt = await pdftotextRegion(pdfPath, numberRegion)
         const tight = txt.split('\n').map(s => s.trim()).filter(Boolean).join(' ')
         if (tight) { numText = tight; usedNumberRegionText = true }
-      } catch {}
+      } catch { }
     }
 
     if (titleRegion) {
@@ -302,7 +362,7 @@ export async function POST(req: Request, { params }: { params: { planId: string 
         const txt = await pdftotextRegion(pdfPath, titleRegion)
         const lines = txt.split('\n').map(s => s.trim()).filter(Boolean)
         if (lines.length) { titleText = lines.slice(0, 2).join(' '); usedTitleRegionText = true }
-      } catch {}
+      } catch { }
     }
 
     // ---------- 2) Rasterize only if a field is still missing ----------
@@ -313,7 +373,7 @@ export async function POST(req: Request, { params }: { params: { planId: string 
       // NUMBER: OCR fallback (robust)
       if (!numText && numberRegion) {
         try {
-          const variants: { img: string; psm: '7'|'8'; th: number|null; raw: string; picked: string|null }[] = []
+          const variants: { img: string; psm: '7' | '8'; th: number | null; raw: string; picked: string | null }[] = []
 
           // no-threshold
           const prepNone = await makeNumberCropVariant(pngPath, numberRegion, {
@@ -342,7 +402,7 @@ export async function POST(req: Request, { params }: { params: { planId: string 
             variants
               .map(v => v.picked)
               .filter((v): v is string => !!v)
-              .sort((a,b) => score(b) - score(a) || b.length - a.length)[0] || ''
+              .sort((a, b) => score(b) - score(a) || b.length - a.length)[0] || ''
 
           numberDebug.variants = variants
         } catch (e) {
@@ -357,10 +417,10 @@ export async function POST(req: Request, { params }: { params: { planId: string 
           const meta = await img.metadata()
           const W = meta.width || 0
           const H = meta.height || 0
-          const left   = Math.max(0, Math.floor(titleRegion.xPct * W))
-          const top    = Math.max(0, Math.floor(titleRegion.yPct * H))
-          const width  = Math.min(W - left, Math.floor(titleRegion.wPct * W))
-          const height = Math.min(H - top,  Math.floor(titleRegion.hPct * H))
+          const left = Math.max(0, Math.floor(titleRegion.xPct * W))
+          const top = Math.max(0, Math.floor(titleRegion.yPct * H))
+          const width = Math.min(W - left, Math.floor(titleRegion.wPct * W))
+          const height = Math.min(H - top, Math.floor(titleRegion.hPct * H))
           const titleCrop = `${pngPath.replace(/\.png$/, '')}-title.png`
 
           await sharp(pngPath)
@@ -375,12 +435,15 @@ export async function POST(req: Request, { params }: { params: { planId: string 
             '-c', 'tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .-_()/' // basic punctuation
           ])
 
-          const lines = (stdout || '')
-            .split('\n').map(s => s.trim()).filter(Boolean)
+          const bestTitle = await ocrTitleAnyOrientation(titleCrop)
+          const lines = bestTitle.text
+            .split('\n')
+            .map(s => s.trim())
+            .filter(Boolean)
             .filter(l => /^[A-Z0-9 .\-_/()]+$/.test(l))
 
           titleText = (lines.slice(0, 2).join(' ') || '').trim()
-        } catch {}
+        } catch { }
       }
     }
 
@@ -389,7 +452,7 @@ export async function POST(req: Request, { params }: { params: { planId: string 
     try {
       const { stdout } = await exec('pdftotext', ['-layout', '-f', '1', '-l', '1', pdfPath, '-'])
       embeddedText = stdout || ''
-    } catch {}
+    } catch { }
 
     let fullText = ''
     if ((!numText && !titleText) && (!embeddedText || embeddedText.trim().length < 40)) {
