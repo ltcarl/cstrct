@@ -13,108 +13,55 @@ import sharp from 'sharp'
 
 const exec = promisify(execFile)
 
-// --- simple heuristics for sheet number/title/discipline
-function parseSuggestions(text: string) {
-  const lines = text.split('\n').map(s => s.trim()).filter(Boolean)
-  // Sheet number examples: M1.01, P-101, A2.3, E-002, FP101
-  const numRegex = /\b([A-Z]{1,3}-?\d{1,4}(?:\.\d{1,3})?[A-Z]?)\b/
-  const numberMatch = (lines.join(' ').match(numRegex)?.[0] ?? '').toUpperCase()
+type Region = { xPct: number; yPct: number; wPct: number; hPct: number }
 
-  const titleCandidate =
-    lines.find(l => l.length > 8 && /^[A-Z0-9 \-_/()]+$/.test(l)) || lines[0] || ''
-
-  // Discipline guess
-  const hay = (titleCandidate + ' ' + numberMatch).toLowerCase()
-  let disc: any = undefined
-  if (/\bhvac\b|(^|[^a-z])m\d/.test(hay)) disc = 'HVAC'
-  else if (/\bplumb|\bp[-\d]/.test(hay)) disc = 'PLUMB'
-  else if (/\belec|\be[-\d]/.test(hay)) disc = 'ELEC'
-  else if (/\barch|\ba[-\d]/.test(hay)) disc = 'ARCH'
-  else if (/\bstruct|\bs[-\d]/.test(hay)) disc = 'STRUCT'
-
-  return {
-    number: numberMatch || undefined,
-    title: titleCandidate.replace(/\s+/g, ' ').trim() || undefined,
-    disc,
-  }
+// --- Parsers tuned for plan sheets ---
+function pickSheetNumber(text: string | undefined) {
+  if (!text) return undefined
+  // Examples: M1.01, P-101, FP101, A2.3, E-002, M-201A
+  const rx = /\b([A-Z]{1,3}-?\d{1,4}(?:\.\d{1,3})?[A-Z]?)\b/g
+  const hits = [...text.toUpperCase().matchAll(rx)].map(m => m[1])
+  // prefer ones starting with known disciplines
+  const pref = hits.find(h => /^(M|P|FP|A|E|S|ME|HVAC|PL|ARCH|ELEC)/.test(h))
+  return pref || hits[0]
 }
 
-export async function POST(
-  _req: Request,
-  { params }: { params: { planId: string } }
-) {
-  const session = await auth()
-  if (!session?.user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+function pickTitle(text: string | undefined) {
+  if (!text) return undefined
+  const lines = text
+    .split('\n')
+    .map(s => s.trim())
+    .filter(Boolean)
+  // choose the longest all-caps-ish line as title
+  const caps = lines
+    .filter(l => /^[A-Z0-9 \-_/()]+$/.test(l) && l.length >= 8)
+    .sort((a, b) => b.length - a.length)
+  return (caps[0] || lines[0] || '').replace(/\s+/g, ' ').trim() || undefined
+}
 
-  // Fetch plan and project (for OCR settings)
-  const plan = await prisma.planSheet.findUnique({ where: { id: params.planId } })
-  if (!plan) return NextResponse.json({ error: 'Plan not found' }, { status: 404 })
-  const project = await prisma.project.findUnique({ where: { id: plan.projectId } })
+function guessDiscipline(number?: string, title?: string) {
+  const hay = ((number || '') + ' ' + (title || '')).toLowerCase()
+  if (/(^|[^a-z])m\d|hvac/.test(hay)) return 'HVAC'
+  if (/\bp[-\d]|plumb|\bfp[-\d]/.test(hay)) return 'PLUMB'
+  if (/\be[-\d]|elec/.test(hay)) return 'ELEC'
+  if (/\ba[-\d]|arch/.test(hay)) return 'ARCH'
+  if (/\bs[-\d]|struct/.test(hay)) return 'STRUCT'
+  return undefined
+}
 
-  await prisma.planSheet.update({
-    where: { id: plan.id },
-    data: { ocrStatus: 'RUNNING' },
-  })
-
-  // S3/MinIO client
-  const usingMinio = process.env.STORAGE_PROVIDER === 'minio'
-  const endpoint = usingMinio
-    ? process.env.S3_PUBLIC_BASE_URL?.replace(/\/[^/]+$/, '') // strip "/<bucket>"
-    : undefined
-
-  const s3 = new S3Client({
-    region: process.env.AWS_REGION,
-    endpoint,
-    forcePathStyle: usingMinio || undefined,
-    credentials: process.env.AWS_ACCESS_KEY_ID
-      ? {
-          accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
-          secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
-        }
-      : undefined,
-  })
-
-  const tmp = await mkdtemp(join(tmpdir(), 'ocr-'))
-  const pdfPath = join(tmp, 'in.pdf')
-  const pngBase = join(tmp, 'page1')
-
-  try {
-    // 1) Download PDF to disk
-    const obj = await s3.send(
-      new GetObjectCommand({ Bucket: process.env.S3_BUCKET!, Key: plan.fileKey })
-    )
-    const body = obj.Body as any
-    await new Promise<void>((resolve, reject) => {
-      const ws = createWriteStream(pdfPath)
-      body.pipe(ws)
-      body.on('error', reject)
-      ws.on('finish', resolve)
-      ws.on('error', reject)
-    })
-
-// ...above code unchanged (auth, download, etc.)
-
-// 2) Try embedded text first (pdftotext – page 1)
-let text = ''
-try {
-  const { stdout } = await exec('pdftotext', ['-layout', '-f', '1', '-l', '1', pdfPath, '-'])
-  if (stdout && stdout.trim().length > 40) text = stdout
-} catch { /* ignore */ }
-
-// helper: crop + tesseract on a region (xPct,yPct,wPct,hPct)
-async function ocrCrop(pngPath: string, region: any) {
+async function ocrCropPng(pngPath: string, region: Region) {
   const img = sharp(pngPath)
   const meta = await img.metadata()
   const width = meta.width || 0
   const height = meta.height || 0
 
   const crop = {
-    left: Math.max(0, Math.floor((region.xPct || 0) * width)),
-    top: Math.max(0, Math.floor((region.yPct || 0) * height)),
-    width: Math.min(width, Math.floor((region.wPct || 1) * width)),
-    height: Math.min(height, Math.floor((region.hPct || 1) * height)),
+    left: Math.max(0, Math.floor(region.xPct * width)),
+    top: Math.max(0, Math.floor(region.yPct * height)),
+    width: Math.min(width, Math.floor(region.wPct * width)),
+    height: Math.min(height, Math.floor(region.hPct * height)),
   }
-  const out = `${pngPath.replace(/\.png$/, '')}-${Math.round(crop.left)}x${Math.round(crop.top)}.png`
+  const out = `${pngPath.replace(/\.png$/, '')}-${crop.left}x${crop.top}.png`
   await img.extract(crop).toFile(out)
 
   const { stdout } = await exec('tesseract', [
@@ -125,64 +72,141 @@ async function ocrCrop(pngPath: string, region: any) {
   return stdout || ''
 }
 
-// 3) If embedded text insufficient, rasterize page 1 and OCR regions
-if (!text || text.trim().length < 40) {
-  const dpi = project?.ocrDpi ?? 300
-  await exec('pdftoppm', ['-singlefile', '-r', String(dpi), '-png', pdfPath, pngBase])
-  const pngPath = `${pngBase}.png`
+export async function POST(req: Request, { params }: { params: { planId: string } }) {
+  const session = await auth()
+  if (!session?.user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-  // Try NUMBER region first
-  let numberText = ''
-  const numRegion = (project?.ocrNumberRegion as any) ||
-                    (project?.ocrRegion as any) || // legacy single box fallback
-                    { xPct: 0.72, yPct: 0.75, wPct: 0.26, hPct: 0.22 } // sensible default
+  const plan = await prisma.planSheet.findUnique({ where: { id: params.planId } })
+  if (!plan) return NextResponse.json({ error: 'Plan not found' }, { status: 404 })
 
-  try { numberText = await ocrCrop(pngPath, numRegion) } catch {}
+  // Pull project OCR settings (our regions!)
+  const project = await prisma.project.findUnique({
+    where: { id: plan.projectId },
+    select: { ocrDpi: true, ocrNumberRegion: true, ocrTitleRegion: true }
+  })
 
-  // Try TITLE region
-  let titleText = ''
-  const titleRegion = (project?.ocrTitleRegion as any) ||
-                      { xPct: 0.05, yPct: 0.05, wPct: 0.60, hPct: 0.20 } // common title block area
-  try { titleText = await ocrCrop(pngPath, titleRegion) } catch {}
+  await prisma.planSheet.update({
+    where: { id: plan.id },
+    data: { ocrStatus: 'RUNNING' },
+  })
 
-  // If both regions are too sparse, OCR full page
-  if ((numberText.trim().length < 5) && (titleText.trim().length < 10)) {
-    const { stdout } = await exec('tesseract', [
-      pngPath, 'stdout', '-l', 'eng', '--oem', '1', '--psm', '6'
-    ])
-    text = stdout || ''
-  } else {
-    // combine regional texts for final parsing fallback
-    text = `${numberText}\n${titleText}`
-  }
-}
+  // S3/MinIO client
+  const usingMinio = process.env.STORAGE_PROVIDER === 'minio'
+  const endpoint = usingMinio
+    ? process.env.S3_PUBLIC_BASE_URL?.replace(/\/[^/]+$/, '')
+    : undefined
 
-// 4) Parse and store suggestions (same as before)
-const { number, title, disc } = parseSuggestions(text)
-const confidence = Math.min(1, (text.length / 2000) + (number ? 0.25 : 0))
+  const s3 = new S3Client({
+    region: process.env.AWS_REGION,
+    endpoint,
+    forcePathStyle: usingMinio || undefined,
+    credentials: process.env.AWS_ACCESS_KEY_ID
+      ? { accessKeyId: process.env.AWS_ACCESS_KEY_ID!, secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY! }
+      : undefined,
+  })
 
-const updated = await prisma.planSheet.update({
-  where: { id: plan.id },
-  data: {
-    ocrStatus: 'DONE',
-    ocrSuggestedNumber: number,
-    ocrSuggestedTitle: title,
-    ocrSuggestedDisc: disc,
-    ocrConfidence: confidence,
-    ocrRaw: { length: text.length, snippet: text.slice(0, 300) } as any,
-  },
-})
+  const tmp = await mkdtemp(join(tmpdir(), 'ocr-'))
+  const pdfPath = join(tmp, 'in.pdf')
+  const outBase = join(tmp, 'page1')
+  const pngPath = `${outBase}.png`
 
-return NextResponse.json({
-  ok: true,
-  suggestions: {
-    sheetNumber: updated.ocrSuggestedNumber,
-    title: updated.ocrSuggestedTitle,
-    discipline: updated.ocrSuggestedDisc,
-    confidence: updated.ocrConfidence,
-  },
-})
+  try {
+    // Download PDF
+    const obj = await s3.send(new GetObjectCommand({
+      Bucket: process.env.S3_BUCKET!, Key: plan.fileKey
+    }))
+    const body = obj.Body as any
+    await new Promise<void>((resolve, reject) => {
+      const ws = createWriteStream(pdfPath)
+      body.pipe(ws)
+      body.on('error', reject)
+      ws.on('finish', resolve)
+      ws.on('error', reject)
+    })
 
+    // Always rasterize first so we can use your regions
+    const dpi = project?.ocrDpi ?? 300
+    await exec('pdftoppm', ['-singlefile', '-r', String(dpi), '-png', pdfPath, outBase])
+
+    // 1) Use your saved regions first (if present)
+    let numText = ''
+    let titleText = ''
+
+    const numberRegion = project?.ocrNumberRegion as Region | null
+    if (numberRegion) {
+      try { numText = await ocrCropPng(pngPath, numberRegion) } catch {}
+    }
+
+    const titleRegion = project?.ocrTitleRegion as Region | null
+    if (titleRegion) {
+      try { titleText = await ocrCropPng(pngPath, titleRegion) } catch {}
+    }
+
+    // 2) If either region text is still sparse, try embedded text quickly to help fill gaps
+    let embeddedText = ''
+    try {
+      const { stdout } = await exec('pdftotext', ['-layout', '-f', '1', '-l', '1', pdfPath, '-'])
+      embeddedText = stdout || ''
+    } catch {}
+
+    // 3) If still missing, OCR full page fallback (helps when PDF is just an image)
+    let fullText = ''
+    if ((!numText && !titleText) && (!embeddedText || embeddedText.trim().length < 40)) {
+      const { stdout } = await exec('tesseract', [
+        pngPath, 'stdout', '-l', 'eng', '--oem', '1', '--psm', '6'
+      ])
+      fullText = stdout || ''
+    }
+
+    // 4) Pick values with clear precedence:
+    //    - sheetNumber from numberRegion first, else from (titleRegion + embedded + full)
+    //    - title from titleRegion first, else from (embedded + full + numberRegion)
+    const sheetNumber =
+      pickSheetNumber(numText) ||
+      pickSheetNumber(titleText) ||
+      pickSheetNumber(embeddedText) ||
+      pickSheetNumber(fullText)
+
+    const title =
+      pickTitle(titleText) ||
+      pickTitle(embeddedText) ||
+      pickTitle(fullText) ||
+      pickTitle(numText)
+
+    const disc = guessDiscipline(sheetNumber, title)
+
+    const combinedText = [numText, titleText, embeddedText || fullText].filter(Boolean).join('\n')
+    const confidence = Math.min(1, (combinedText.length / 2000) + (sheetNumber ? 0.25 : 0))
+
+    const updated = await prisma.planSheet.update({
+      where: { id: plan.id },
+      data: {
+        ocrStatus: 'DONE',
+        ocrSuggestedNumber: sheetNumber || undefined,
+        ocrSuggestedTitle: title || undefined,
+        ocrSuggestedDisc: disc,
+        ocrConfidence: confidence,
+        ocrRaw: {
+          lengths: {
+            numberRegion: numText.length,
+            titleRegion: titleText.length,
+            embedded: embeddedText.length,
+            full: fullText.length
+          },
+          previewDpi: dpi
+        } as any,
+      },
+    })
+
+    return NextResponse.json({
+      ok: true,
+      suggestions: {
+        sheetNumber: updated.ocrSuggestedNumber,
+        title: updated.ocrSuggestedTitle,
+        discipline: updated.ocrSuggestedDisc,
+        confidence: updated.ocrConfidence,
+      },
+    })
   } catch (err) {
     console.error('OCR error:', err)
     await prisma.planSheet.update({
