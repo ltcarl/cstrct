@@ -74,6 +74,12 @@ export default function ProjectDetail() {
           <PlanViewer fileUrl={previewUrl} />
         </section>
       )}
+<a
+  className="underline text-sm"
+  href={`/projects/${id}/ocr`}
+>
+  OCR Region Editor
+</a>
 
       <section>
         <h2 className="font-medium mb-3">All plan sheets</h2>
