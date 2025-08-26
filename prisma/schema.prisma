@@ -31,8 +31,7 @@ model User {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   memberships Membership[]
-  uploadedPlans PlanSheet[] @relation("UserUploadedPlans")
-
+  uploadedPlans  PlanSheet[]  @relation("UserUploadedPlans")
 }
 
 model Organization {
@@ -101,11 +100,12 @@ model PlanSheet {
   project     Project    @relation(fields: [projectId], references: [id])
 
   uploaderId  String
-  uploader    User       @relation(fields: [uploaderId], references: [id])
+  uploader    User       @relation("UserUploadedPlans", fields: [uploaderId], references: [id])
 
-  sheetNumber String?    // nullable – OCR fills later
-  title       String?    // nullable – OCR fills later
-  discipline  Discipline?// nullable – OCR fills later
+  sheetNumber String?
+  title       String?
+  discipline  Discipline?
+
   version     Int        @default(1)
 
   fileKey     String
