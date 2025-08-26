@@ -69,32 +69,54 @@ async function prepareNumberCrop(pngPath: string, region: Region) {
   return out
 }
 
-async function makeNumberCropVariant(pngPath: string, region: Region, opts: { padPct?: number, threshold?: number }) {
+async function makeNumberCropVariant(
+  pngPath: string,
+  region: { xPct: number; yPct: number; wPct: number; hPct: number },
+  opts: {
+    threshold?: number
+    padPct?: number
+    innerTrimPct?: number   // <-- add this
+  }
+) {
   const img = sharp(pngPath)
   const meta = await img.metadata()
   const W = meta.width || 0
   const H = meta.height || 0
 
-  const pad = opts.padPct ?? 0.12 // a bit more padding
-  const left = Math.max(0, Math.floor((region.xPct - pad) * W))
-  const top = Math.max(0, Math.floor((region.yPct - pad) * H))
-  const w = Math.min(W - left, Math.floor((region.wPct + pad * 2) * W))
-  const h = Math.min(H - top, Math.floor((region.hPct + pad * 2) * H))
+  let left = Math.max(0, Math.floor(region.xPct * W))
+  let top = Math.max(0, Math.floor(region.yPct * H))
+  let width = Math.min(W - left, Math.floor(region.wPct * W))
+  let height = Math.min(H - top, Math.floor(region.hPct * H))
 
-  const out = `${pngPath.replace(/\.png$/, '')}-num-${randomUUID()}.png`
+  // apply padding
+  if (opts.padPct) {
+    left = Math.max(0, left - Math.floor(width * opts.padPct))
+    top = Math.max(0, top - Math.floor(height * opts.padPct))
+    width = Math.min(W - left, width + Math.floor(width * opts.padPct * 2))
+    height = Math.min(H - top, height + Math.floor(height * opts.padPct * 2))
+  }
 
-  // preprocess: grayscale → normalize → sharpen → gamma → threshold → 2x resize
-  await sharp(pngPath)
-    .extract({ left, top, width: w, height: h })
+  // apply inner trim
+  if (opts.innerTrimPct) {
+    left += Math.floor(width * opts.innerTrimPct)
+    width -= Math.floor(width * opts.innerTrimPct * 2)
+    top += Math.floor(height * opts.innerTrimPct)
+    height -= Math.floor(height * opts.innerTrimPct * 2)
+  }
+
+  const outPath = `${pngPath.replace(/\.png$/, '')}-num-${Date.now()}.png`
+  let proc = sharp(pngPath)
+    .extract({ left, top, width, height })
     .grayscale()
     .normalize()
-    .sharpen()
-    .gamma(1.2)
-    .threshold(opts.threshold ?? 170)   // try several later
-    .resize(w * 2, h * 2, { kernel: 'lanczos3' })
-    .toFile(out)
+    .resize(width * 3, height * 3)
 
-  return out
+  if (typeof opts.threshold === 'number') {
+    proc = proc.threshold(opts.threshold)
+  }
+
+  await proc.toFile(outPath)
+  return outPath
 }
 
 async function tesseractNumber(imgPath: string, psm: '7' | '8' | '13') {
