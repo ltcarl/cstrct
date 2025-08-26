@@ -16,14 +16,47 @@ const exec = promisify(execFile)
 
 type Region = { xPct: number; yPct: number; wPct: number; hPct: number }
 
-// Number: e.g., M1.01, P-101, FP101, A2.3, E-002, M-201A
+// Accepts IDs like: M1.01, P-101, FP101, A2.3, E-002, M-201A,
+// and also digit-first like: 68H01, 15P101, 1M101, 2A-03, 01G.02
 function pickSheetNumber(text?: string) {
   if (!text) return undefined
-  const rx = /\b([A-Z]{1,3}-?\d{1,4}(?:\.\d{1,3})?[A-Z]?)\b/g
-  const hits = [...text.toUpperCase().matchAll(rx)].map(m => m[1])
-  if (!hits.length) return undefined
-  const pref = hits.find(h => /^(HVAC|ME|M|FP|P|PL|A|E|S)/.test(h))
-  return (pref || hits[0]).replace(/\s+/g, '')
+  const T = text.toUpperCase()
+
+  // 1) Collect candidates from several flexible patterns:
+  const patterns = [
+    /\b[A-Z]{1,3}-?\d{1,4}(?:\.\d{1,3})?[A-Z]?\b/g,   // letter-first (old)
+    /\b\d{1,3}[A-Z]{1,3}\d{1,4}\b/g,                  // digit + letter + digit (e.g., 68H01, 15P101)
+    /\b\d{1,3}[A-Z]{1,3}(?:-\d{1,4}|\.\d{1,3})\b/g,   // 01G-02, 01G.02
+    /\b[A-Z]\d[A-Z]\d{2,3}\b/g,                       // M1A101 style
+  ]
+
+  const hits = new Set<string>()
+  for (const rx of patterns) {
+    for (const m of T.matchAll(rx)) hits.add(m[0])
+  }
+
+  // nothing matched
+  if (!hits.size) return undefined
+
+  // 2) Score candidates: prefer mix of letters+digits, sane length, and common discipline hints
+  const score = (s: string) => {
+    let sc = 0
+    const len = s.replace(/\s/g,'').length
+    if (len >= 3 && len <= 8) sc += 2
+    if (/[A-Z]/.test(s) && /\d/.test(s)) sc += 3
+    if (/[.-]/.test(s)) sc += 1
+    if (/^(HVAC|ME|M|FP|P|PL|A|E|S)/.test(s)) sc += 1
+    // slight nudge if it ends with 2–3 digits (common)
+    if (/\d{2,3}$/.test(s)) sc += 1
+    return sc
+  }
+
+  // 3) Pick highest scored; break ties by shorter, then original order
+  const ordered = Array.from(hits)
+    .map(v => ({ v, s: score(v) }))
+    .sort((a,b) => b.s - a.s || a.v.length - b.v.length)
+
+  return ordered[0]?.v?.replace(/\s+/g, '')
 }
 
 // Title: join first 2 strong lines
