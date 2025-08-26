@@ -54,16 +54,11 @@ export async function POST(
   try {
     const plan = await prisma.planSheet.create({
       data: {
-        // If your model has a scalar projectId, this is fine:
-        projectId: params.projectId,
-        // If instead it only exposes the relation, use:
-        // project: { connect: { id: params.projectId } },
-
-        uploader: { connect: { id: session.user.id } },   // ✅ relation connect
-
+        projectId: params.projectId,          
+        uploaderId: session.user.id!,         
         version: 1,
         fileKey: parsed.data.fileKey,
-        fileUrl: parsed.data.fileUrl ?? null,
+        fileUrl: parsed.data.fileUrl ?? null, 
         ocrStatus: 'PENDING',
       },
       select: { id: true, projectId: true },

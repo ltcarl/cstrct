@@ -96,19 +96,24 @@ enum Discipline {
 }
 
 model PlanSheet {
-  id          String      @id @default(cuid())
+  id          String     @id @default(cuid())
   projectId   String
-  sheetNumber String?
-  title       String?
-  discipline  Discipline?
-  version     Int         @default(1)
-  fileKey     String      // S3 object key
-  fileUrl     String?      // public URL
-  uploadedBy  String
-  createdAt   DateTime    @default(now())
-  project     Project     @relation(fields: [projectId], references: [id])
-  uploader    User        @relation("UserUploadedPlans", fields: [uploadedBy], references: [id])
-  ocrStatus          OcrStatus   @default(PENDING)
+  project     Project    @relation(fields: [projectId], references: [id])
+
+  uploaderId  String
+  uploader    User       @relation(fields: [uploaderId], references: [id])
+
+  sheetNumber String?    // nullable – OCR fills later
+  title       String?    // nullable – OCR fills later
+  discipline  Discipline?// nullable – OCR fills later
+  version     Int        @default(1)
+
+  fileKey     String
+  fileUrl     String?    // nullable if you always sign GET
+
+  ocrStatus   OcrStatus  @default(PENDING)
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
   ocrSuggestedNumber String?
   ocrSuggestedTitle  String?
   ocrSuggestedDisc   Discipline?
