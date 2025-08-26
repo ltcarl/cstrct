@@ -92,117 +92,91 @@ export async function POST(
       ws.on('error', reject)
     })
 
-    // 2) Try embedded text first (pdftotext – page 1)
-    let text = ''
-    try {
-      const { stdout } = await exec('pdftotext', ['-layout', '-f', '1', '-l', '1', pdfPath, '-'])
-      if (stdout && stdout.trim().length > 40) text = stdout
-    } catch {
-      /* ignore; will OCR */
-    }
+   // 2) Try embedded text first (pdftotext – page 1)
+let text = ''
+try {
+  const { stdout } = await exec('pdftotext', ['-layout', '-f', '1', '-l', '1', pdfPath, '-'])
+  if (stdout && stdout.trim().length > 40) text = stdout
+} catch { /* ignore */ }
 
-    // 3) If embedded text insufficient, rasterize and OCR crop first
-    if (!text || text.trim().length < 40) {
-      const dpi = project?.ocrDpi ?? 300
-      await exec('pdftoppm', ['-singlefile', '-r', String(dpi), '-png', pdfPath, pngBase])
-      const pngPath = `${pngBase}.png`
+// helper: crop + tesseract on a region (xPct,yPct,wPct,hPct)
+async function ocrCrop(pngPath: string, region: any) {
+  const img = sharp(pngPath)
+  const meta = await img.metadata()
+  const width = meta.width || 0
+  const height = meta.height || 0
 
-      const img = sharp(pngPath)
-      const meta = await img.metadata()
-      const width = meta.width || 0
-      const height = meta.height || 0
-      const isLandscape = width > height
+  const crop = {
+    left: Math.max(0, Math.floor((region.xPct || 0) * width)),
+    top: Math.max(0, Math.floor((region.yPct || 0) * height)),
+    width: Math.min(width, Math.floor((region.wPct || 1) * width)),
+    height: Math.min(height, Math.floor((region.hPct || 1) * height)),
+  }
+  const out = `${pngPath.replace(/\.png$/, '')}-${Math.round(crop.left)}x${Math.round(crop.top)}.png`
+  await img.extract(crop).toFile(out)
 
-      // default region (percentages) – bottom-right for landscape
-      let region: any = project?.ocrRegion || null
-      const corner = project?.ocrCorner || 'BOTTOM_RIGHT'
-      if (!region) {
-        if (isLandscape && corner === 'BOTTOM_RIGHT') {
-          region = { xPct: 0.72, yPct: 0.75, wPct: 0.28, hPct: 0.25 }
-        } else {
-          // fallback: full page
-          region = { xPct: 0, yPct: 0, wPct: 1, hPct: 1 }
-        }
-      }
+  const { stdout } = await exec('tesseract', [
+    out, 'stdout',
+    '-l', 'eng', '--oem', '1', '--psm', '6',
+    '-c', 'tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.- /()'
+  ])
+  return stdout || ''
+}
 
-      // convert to pixel crop
-      const crop = {
-        left: Math.max(0, Math.floor((region.xPct || 0) * width)),
-        top: Math.max(0, Math.floor((region.yPct || 0) * height)),
-        width: Math.min(width, Math.floor((region.wPct || 1) * width)),
-        height: Math.min(height, Math.floor((region.hPct || 1) * height)),
-      }
+// 3) If embedded text insufficient, rasterize page 1 and OCR regions
+if (!text || text.trim().length < 40) {
+  const dpi = project?.ocrDpi ?? 300
+  await exec('pdftoppm', ['-singlefile', '-r', String(dpi), '-png', pdfPath, pngBase])
+  const pngPath = `${pngBase}.png`
 
-      const croppedPath = `${pngBase}-crop.png`
-      await img.extract(crop).toFile(croppedPath)
+  // Try NUMBER region first
+  let numberText = ''
+  const numRegion = (project?.ocrNumberRegion as any) ||
+                    (project?.ocrRegion as any) || // legacy single box fallback
+                    { xPct: 0.72, yPct: 0.75, wPct: 0.26, hPct: 0.22 } // sensible default
 
-      // Tesseract tuned for sheet numbers/text blocks
-      const tessCrop = await exec('tesseract', [
-        croppedPath,
-        'stdout',
-        '-l',
-        'eng',
-        '--oem',
-        '1',
-        '--psm',
-        '6',
-        '-c',
-        'tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.- ',
-      ])
-      text = tessCrop.stdout || ''
+  try { numberText = await ocrCrop(pngPath, numRegion) } catch {}
 
-      // If the crop is too sparse, OCR full page as a fallback
-      if (!text || text.trim().length < 15) {
-        const tessFull = await exec('tesseract', [
-          `${pngBase}.png`,
-          'stdout',
-          '-l',
-          'eng',
-          '--oem',
-          '1',
-          '--psm',
-          '6',
-        ])
-        text = tessFull.stdout || ''
-      }
-    }
+  // Try TITLE region
+  let titleText = ''
+  const titleRegion = (project?.ocrTitleRegion as any) ||
+                      { xPct: 0.05, yPct: 0.05, wPct: 0.60, hPct: 0.20 } // common title block area
+  try { titleText = await ocrCrop(pngPath, titleRegion) } catch {}
 
-    // 4) Parse and store suggestions
-    const { number, title, disc } = parseSuggestions(text)
-    const confidence = Math.min(1, (text.length / 2000) + (number ? 0.25 : 0))
-
-    const updated = await prisma.planSheet.update({
-      where: { id: plan.id },
-      data: {
-        ocrStatus: 'DONE',
-        ocrSuggestedNumber: number,
-        ocrSuggestedTitle: title,
-        ocrSuggestedDisc: disc,
-        ocrConfidence: confidence,
-        ocrRaw: {
-          length: text.length,
-          snippet: text.slice(0, 300),
-        } as any,
-      },
-    })
-
-    return NextResponse.json({
-      ok: true,
-      suggestions: {
-        sheetNumber: updated.ocrSuggestedNumber,
-        title: updated.ocrSuggestedTitle,
-        discipline: updated.ocrSuggestedDisc,
-        confidence: updated.ocrConfidence,
-      },
-    })
-  } catch (err) {
-    console.error('OCR error:', err)
-    await prisma.planSheet.update({
-      where: { id: plan.id },
-      data: { ocrStatus: 'FAILED' },
-    })
-    return NextResponse.json({ error: 'OCR failed' }, { status: 500 })
-  } finally {
-    await rm(tmp, { recursive: true, force: true })
+  // If both regions are too sparse, OCR full page
+  if ((numberText.trim().length < 5) && (titleText.trim().length < 10)) {
+    const { stdout } = await exec('tesseract', [
+      pngPath, 'stdout', '-l', 'eng', '--oem', '1', '--psm', '6'
+    ])
+    text = stdout || ''
+  } else {
+    // combine regional texts for final parsing fallback
+    text = `${numberText}\n${titleText}`
   }
 }
+
+// 4) Parse and store suggestions (same as before)
+const { number, title, disc } = parseSuggestions(text)
+const confidence = Math.min(1, (text.length / 2000) + (number ? 0.25 : 0))
+
+const updated = await prisma.planSheet.update({
+  where: { id: plan.id },
+  data: {
+    ocrStatus: 'DONE',
+    ocrSuggestedNumber: number,
+    ocrSuggestedTitle: title,
+    ocrSuggestedDisc: disc,
+    ocrConfidence: confidence,
+    ocrRaw: { length: text.length, snippet: text.slice(0, 300) } as any,
+  },
+})
+
+return NextResponse.json({
+  ok: true,
+  suggestions: {
+    sheetNumber: updated.ocrSuggestedNumber,
+    title: updated.ocrSuggestedTitle,
+    discipline: updated.ocrSuggestedDisc,
+    confidence: updated.ocrConfidence,
+  },
+})
