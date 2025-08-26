@@ -46,6 +46,46 @@ async function prepareNumberCrop(pngPath: string, region: Region) {
   return out
 }
 
+async function makeNumberCropVariant(pngPath: string, region: Region, opts: { padPct?: number, threshold?: number }) {
+  const img = sharp(pngPath)
+  const meta = await img.metadata()
+  const W = meta.width || 0
+  const H = meta.height || 0
+
+  const pad = opts.padPct ?? 0.12 // a bit more padding
+  const left  = Math.max(0, Math.floor((region.xPct - pad) * W))
+  const top   = Math.max(0, Math.floor((region.yPct - pad) * H))
+  const w     = Math.min(W - left, Math.floor((region.wPct + pad * 2) * W))
+  const h     = Math.min(H - top,  Math.floor((region.hPct + pad * 2) * H))
+
+  const out = `${pngPath.replace(/\.png$/, '')}-num-${randomUUID()}.png`
+
+  // preprocess: grayscale → normalize → sharpen → gamma → threshold → 2x resize
+  await sharp(pngPath)
+    .extract({ left, top, width: w, height: h })
+    .grayscale()
+    .normalize()
+    .sharpen()
+    .gamma(1.2)
+    .threshold(opts.threshold ?? 170)   // try several later
+    .resize(w * 2, h * 2, { kernel: 'lanczos3' })
+    .toFile(out)
+
+  return out
+}
+
+async function tesseractNumber(imgPath: string, psm: '7'|'8'|'13') {
+  const args = [
+    imgPath, 'stdout',
+    '-l', 'eng',
+    '--oem', '1',
+    '--psm', psm,
+    '-c', 'tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-'
+  ]
+  const { stdout } = await exec('tesseract', args)
+  return (stdout || '').trim()
+}
+
 async function tesseractStdout(imgPath: string, psm: '7'|'8') {
   const args = [
     imgPath, 'stdout',
@@ -58,47 +98,38 @@ async function tesseractStdout(imgPath: string, psm: '7'|'8') {
   return (stdout || '').trim()
 }
 
-// Accepts IDs like: M1.01, P-101, FP101, A2.3, E-002, M-201A,
-// and also digit-first like: 68H01, 15P101, 1M101, 2A-03, 01G.02
+// Accept more formats incl. digit-first like 68H01
 function pickSheetNumber(text?: string) {
   if (!text) return undefined
   const T = text.toUpperCase()
 
-  // 1) Collect candidates from several flexible patterns:
   const patterns = [
-    /\b[A-Z]{1,3}-?\d{1,4}(?:\.\d{1,3})?[A-Z]?\b/g,   // letter-first (old)
-    /\b\d{1,3}[A-Z]{1,3}\d{1,4}\b/g,                  // digit + letter + digit (e.g., 68H01, 15P101)
+    /\b[A-Z]{1,3}-?\d{1,4}(?:\.\d{1,3})?[A-Z]?\b/g,   // letter-first
+    /\b\d{1,3}[A-Z]{1,3}\d{1,4}\b/g,                  // 68H01, 15P101
     /\b\d{1,3}[A-Z]{1,3}(?:-\d{1,4}|\.\d{1,3})\b/g,   // 01G-02, 01G.02
-    /\b[A-Z]\d[A-Z]\d{2,3}\b/g,                       // M1A101 style
+    /\b[A-Z]\d[A-Z]\d{2,3}\b/g,                       // M1A101
   ]
 
   const hits = new Set<string>()
-  for (const rx of patterns) {
-    for (const m of T.matchAll(rx)) hits.add(m[0])
-  }
+  for (const rx of patterns) for (const m of T.matchAll(rx)) hits.add(m[0])
 
-  // nothing matched
   if (!hits.size) return undefined
 
-  // 2) Score candidates: prefer mix of letters+digits, sane length, and common discipline hints
   const score = (s: string) => {
     let sc = 0
-    const len = s.replace(/\s/g,'').length
-    if (len >= 3 && len <= 8) sc += 2
-    if (/[A-Z]/.test(s) && /\d/.test(s)) sc += 3
-    if (/[.-]/.test(s)) sc += 1
-    if (/^(HVAC|ME|M|FP|P|PL|A|E|S)/.test(s)) sc += 1
-    // slight nudge if it ends with 2–3 digits (common)
-    if (/\d{2,3}$/.test(s)) sc += 1
+    const clean = s.replace(/\s/g,'')
+    const len = clean.length
+    if (len >= 3 && len <= 10) sc += 2
+    if (/[A-Z]/.test(clean) && /\d/.test(clean)) sc += 3
+    if (/[.-]/.test(clean)) sc += 1
+    if (/^(HVAC|ME|M|FP|P|PL|A|E|S|\d)/.test(clean)) sc += 1
+    if (/\d$/.test(clean)) sc += 1
     return sc
   }
 
-  // 3) Pick highest scored; break ties by shorter, then original order
-  const ordered = Array.from(hits)
-    .map(v => ({ v, s: score(v) }))
-    .sort((a,b) => b.s - a.s || a.v.length - b.v.length)
-
-  return ordered[0]?.v?.replace(/\s+/g, '')
+  return Array.from(hits)
+    .map(v => ({ v: v.replace(/\s+/g, ''), s: score(v) }))
+    .sort((a,b) => b.s - a.s || a.v.length - b.v.length)[0]?.v
 }
 
 // Title: join first 2 strong lines
@@ -231,28 +262,35 @@ export async function POST(req: Request, { params }: { params: { planId: string 
     // 1) Use saved regions first — with tuned PSM + whitelist
     let numText = ''
     const numberRegion = project?.ocrNumberRegion as Region | null
+    let numberDebug: any = {}
+    
     if (numberRegion) {
       try {
-        // preprocess the crop first (padding + binarize + 2x)
-        const numImg = await prepareNumberCrop(pngPath, numberRegion)
+        // try a few threshold levels and PSMs; pick best candidate
+        const thresholds = [190, 170, 150]
+        const psms: ('7'|'8'|'13')[] = ['7','8','13']
+        const candidates: string[] = []
+        numberDebug.variants = []
     
-        // pass 1: single line (psm 7)
-        const pass1 = await tesseractStdout(numImg, '7')
+        for (const th of thresholds) {
+          const variant = await makeNumberCropVariant(pngPath, numberRegion, { threshold: th })
+          for (const psm of psms) {
+            const out = await tesseractNumber(variant, psm)
+            const cand = pickSheetNumber(out)
+            numberDebug.variants.push({ threshold: th, psm, raw: out, picked: cand || null })
+            if (cand) candidates.push(cand)
+          }
+        }
     
-        // pass 2: single word (psm 8) — often better for IDs like 68H01
-        const pass2 = await tesseractStdout(numImg, '8')
-    
-        // choose the pass that yields the stronger sheet number
-        const cand1 = pickSheetNumber(pass1) || ''
-        const cand2 = pickSheetNumber(pass2) || ''
-    
-        // scoring: prefer longer alnum strings, then the one that ends with a digit
+        // choose best by length & ends-with-digit preference
         const score = (s: string) =>
-          (s.replace(/[^A-Z0-9.-]/g, '').length) +
-          (/\d$/.test(s) ? 1 : 0)
+          (s.replace(/[^A-Z0-9.-]/g, '').length) + (/\d$/.test(s) ? 1 : 0)
+        const best = candidates.sort((a,b) => score(b) - score(a) || b.length - a.length)[0]
     
-        numText = score(cand2) > score(cand1) ? cand2 : cand1
-      } catch {}
+        numText = best || ''
+      } catch (e) {
+        numberDebug.error = String(e)
+      }
     }
 
     let titleText = ''
@@ -328,6 +366,9 @@ const updated = await prisma.planSheet.update({
         discipline: updated.ocrSuggestedDisc,
         confidence: updated.ocrConfidence,
       },
+      debug: {
+        numberOCR: numberDebug
+      }
     })
   } catch (err) {
     console.error('OCR error:', err)
