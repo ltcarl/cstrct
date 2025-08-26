@@ -99,21 +99,23 @@ model PlanSheet {
   projectId   String
   project     Project    @relation(fields: [projectId], references: [id])
 
-  uploaderId  String
-  uploader    User       @relation("UserUploadedPlans", fields: [uploaderId], references: [id])
+  // Add as OPTIONAL first so existing rows are valid
+  uploaderId  String?          // <- optional for now
+  uploader    User? @relation("UserUploadedPlans", fields: [uploaderId], references: [id])
 
   sheetNumber String?
   title       String?
   discipline  Discipline?
-
   version     Int        @default(1)
 
   fileKey     String
-  fileUrl     String?    // nullable if you always sign GET
+  fileUrl     String?
 
   ocrStatus   OcrStatus  @default(PENDING)
   createdAt   DateTime   @default(now())
-  updatedAt   DateTime   @updatedAt
+
+  // Add with a DEFAULT so Postgres can fill existing rows
+  updatedAt   DateTime   @updatedAt @default(now())
   ocrSuggestedNumber String?
   ocrSuggestedTitle  String?
   ocrSuggestedDisc   Discipline?
