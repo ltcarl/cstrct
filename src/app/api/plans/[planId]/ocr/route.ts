@@ -47,7 +47,8 @@ function mapRegionForRotation(
   }
 }
 
-export async function pdftotextRegion(pdfPath: string, r: RegionPct) {
+// make this a local helper; do NOT export from a route module
+async function pdftotextRegion(pdfPath: string, r: Region) {
   const { w: pageW, h: pageH, rot } = await getPdfPageInfo(pdfPath)
 
   // Region in points in *unrotated* page space
