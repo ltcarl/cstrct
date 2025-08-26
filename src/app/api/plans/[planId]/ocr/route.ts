@@ -359,7 +359,7 @@ export async function POST(req: Request, { params }: { params: { planId: string 
           })
           for (const psm of ['8', '7'] as const) {
             const raw = await tesseractNumber(prepNone, psm)
-            variants.push({ img: prepNone, psm, th: undefined, raw, picked: pickSheetNumber(raw) || null })
+            variants.push({ img: prepNone, psm, th: null, raw, picked: pickSheetNumber(raw) || null })
           }
 
           // variant B/C: binarized at two levels
