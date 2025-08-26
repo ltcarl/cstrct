@@ -85,11 +85,14 @@ export default function PlanReviewPage({ params }: { params: { id: string } }) {
       // 2) run ocr
       const res = await fetch(`/api/plans/${planId}/ocr`, { method: 'POST', credentials: 'include' })
       const j = await res.json()
-      // mine alternatives (top unique sheet-number candidates) from debug if present
-      // build alternatives (unique, non-empty strings)
-      const raw = (j?.debug?.numberOCR?.variants ?? [])
-        .map((v: any) => v?.picked)
-        .filter((x: unknown): x is string => typeof x === 'string' && x.length > 0)
+      // Variants come back untyped; declare the minimal shape we need
+      type V = { picked?: string | null }
+      const variants = (j?.debug?.numberOCR?.variants ?? []) as V[]
+
+      // Build a unique list of non-empty candidates
+      const raw: string[] = variants
+        .map(v => v?.picked ?? null)
+        .filter((x): x is string => typeof x === 'string' && x.length > 0)
 
       const alts: string[] = Array.from(new Set(raw)).slice(0, 5)
 
