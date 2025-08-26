@@ -70,47 +70,6 @@ export async function pdftotextRegion(pdfPath: string, r: RegionPct) {
   return (stdout || '').trim()
 }
 
-async function pdftotextRegion(pdfPath: string, r: RegionPct) {
-  const { w: pageW, h: pageH, rot } = await getPdfPageInfo(pdfPath)
-
-  // region → points in *unrotated* page space
-  const x0 = Math.max(0, Math.floor(r.xPct * pageW))
-  const y0 = Math.max(0, Math.floor(r.yPct * pageH))
-  const W0 = Math.max(1, Math.floor(r.wPct * pageW))
-  const H0 = Math.max(1, Math.floor(r.hPct * pageH))
-
-  // remap for rotated page
-  const { x, y, W, H } = mapRegionForRotation(x0, y0, W0, H0, pageW, pageH, rot)
-
-  const args = ['-layout', '-nopgbrk', '-f', '1', '-l', '1',
-                '-x', String(x), '-y', String(y), '-W', String(W), '-H', String(H),
-                pdfPath, '-']
-  const { stdout } = await exec('pdftotext', args)
-  return (stdout || '').trim()
-}
-
-/** Read page size in points from pdfinfo (first page) */
-async function getPdfPageSizePts(pdfPath: string) {
-  const { stdout } = await exec('pdfinfo', [pdfPath])
-  // Look for: "Page size:   841.89 x 595.28 pts"
-  const m = stdout.match(/Page size:\s+([\d.]+)\s+x\s+([\d.]+)\s+pts/i)
-  if (!m) return { w: 612, h: 792 } // default Letter portrait, won’t hurt
-  return { w: parseFloat(m[1]), h: parseFloat(m[2]) }
-}
-
-async function pdftotextRegion(pdfPath: string, regionPct: { xPct: number; yPct: number; wPct: number; hPct: number }) {
-  const { w: pageWpts, h: pageHpts } = await getPdfPageSizePts(pdfPath)
-
-  const x = Math.max(0, Math.floor(regionPct.xPct * pageWpts))
-  const y = Math.max(0, Math.floor(regionPct.yPct * pageHpts))
-  const W = Math.max(1, Math.floor(regionPct.wPct * pageWpts))
-  const H = Math.max(1, Math.floor(regionPct.hPct * pageHpts))
-
-  // -layout preserves ordering; -f/-l 1 clamp to page 1; -x/-y/-W/-H clip to rectangle (points; origin top-left)
-  const args = ['-layout', '-nopgbrk', '-f', '1', '-l', '1', '-x', String(x), '-y', String(y), '-W', String(W), '-H', String(H), pdfPath, '-']
-  const { stdout } = await exec('pdftotext', args)
-  return (stdout || '').trim()
-}
 
 async function makeNumberCropVariant(
   pngPath: string,
