@@ -71,6 +71,8 @@ model Project {
   ocrRegion      Json?       // e.g. {"xPct":0.70,"yPct":0.70,"wPct":0.28,"hPct":0.25}
   ocrDpi         Int         @default(300)    // rasterization DPI for OCR
   ocrCorner      OcrCorner   @default(BOTTOM_RIGHT)
+  ocrNumberRegion Json?       // e.g. {"xPct":0.72,"yPct":0.75,"wPct":0.26,"hPct":0.22}
+  ocrTitleRegion  Json?       // e.g. {"xPct":0.05,"yPct":0.05,"wPct":0.60,"hPct":0.20}
 }
 
 enum OcrCorner {
