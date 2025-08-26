@@ -154,9 +154,9 @@ async function ocrTitleAnyOrientation(cropPath: string) {
 // Similar helper for sheet numbers (single line, whitelist)
 async function ocrNumberAnyOrientation(cropPath: string) {
   const whitelist = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-'
-  const variants: Array<{ angle: 0 | 90 | 270; psm: '7' | '8'; raw: string }> = []
+  const variants: Array<{ angle: 0 | 90 | 270; psm: '7' | '6'; raw: string }> = []
   for (const angle of [0, 90, 270] as const) {
-    for (const psm of ['7', '8'] as const) {
+    for (const psm of ['7', '6'] as const) {
       const raw = await ocrRotated(cropPath, angle, { psm, whitelist })
       variants.push({ angle, psm, raw })
     }
