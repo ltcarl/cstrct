@@ -21,10 +21,10 @@ type PageInfo = { w: number; h: number; rot: 0 | 90 | 180 | 270 }
 async function getPdfPageInfo(pdfPath: string): Promise<PageInfo> {
   const { stdout } = await exec('pdfinfo', [pdfPath])
   const size = stdout.match(/Page size:\s+([\d.]+)\s+x\s+([\d.]+)\s+pts/i)
-  const rot  = stdout.match(/Page rot:\s+(\d+)/i) || stdout.match(/Rotate:\s+(\d+)/i)
+  const rot = stdout.match(/Page rot:\s+(\d+)/i) || stdout.match(/Rotate:\s+(\d+)/i)
   const w = size ? parseFloat(size[1]) : 612
   const h = size ? parseFloat(size[2]) : 792
-  const r = (rot ? parseInt(rot[1], 10) : 0) as 0|90|180|270
+  const r = (rot ? parseInt(rot[1], 10) : 0) as 0 | 90 | 180 | 270
   return { w, h, rot: r }
 }
 
@@ -67,40 +67,74 @@ function clampRect(x: number, y: number, W: number, H: number, pageW: number, pa
   return { x: cx, y: cy, W: cW, H: cH }
 }
 
+// If regions were saved against a rotated preview (90/180/270), map them back
+// to unrotated (0°) page-space percentages.
+function invertPctRegionFromRotated(region: Region, rot: 0 | 90 | 180 | 270): Region {
+  const { xPct: x, yPct: y, wPct: w, hPct: h } = region
+  if (rot === 0) return region
+  if (rot === 90) return { xPct: 1 - (y + h), yPct: x, wPct: h, hPct: w }
+  if (rot === 180) return { xPct: 1 - (x + w), yPct: 1 - (y + h), wPct: w, hPct: h }
+  // 270
+  return { xPct: y, yPct: 1 - (x + w), wPct: h, hPct: w }
+}
+
 // Vector-first extraction with both -raw and -layout; pick best by heuristic.
 async function pdftotextRegionBest(pdfPath: string, r: Region) {
   const { w: pageW, h: pageH, rot } = await getPdfPageInfo(pdfPath)
-  const x0 = Math.max(0, Math.floor(r.xPct * pageW))
-  const y0 = Math.max(0, Math.floor(r.yPct * pageH))
-  const W0 = Math.max(1, Math.floor(r.wPct * pageW))
-  const H0 = Math.max(1, Math.floor(r.hPct * pageH))
 
-  const m = mapRegionForRotation(x0, y0, W0, H0, pageW, pageH, rot)
-  const { x, y, W, H } = clampRect(m.x, m.y, m.W, m.H, rot === 90 || rot === 270 ? pageH : pageW, rot === 90 || rot === 270 ? pageW : pageH)
+  // Try as-saved and an inverted variant in case UI saved rotated coords
+  const candidates: Region[] = [r]
+  if (rot !== 0) candidates.push(invertPctRegionFromRotated(r, rot))
 
-  const run = async (mode: 'layout' | 'raw') => {
-    const args = [
-      mode === 'layout' ? '-layout' : '-raw',
-      '-nopgbrk',
-      '-f', '1', '-l', '1',
-      '-x', String(x), '-y', String(y),
-      '-W', String(W), '-H', String(H),
-      pdfPath, '-'
-    ]
-    const { stdout } = await exec('pdftotext', args)
-    return (stdout || '').trim()
+  const runFor = async (R: Region) => {
+    const x0 = Math.max(0, Math.floor(R.xPct * pageW))
+    const y0 = Math.max(0, Math.floor(R.yPct * pageH))
+    const W0 = Math.max(1, Math.floor(R.wPct * pageW))
+    const H0 = Math.max(1, Math.floor(R.hPct * pageH))
+
+    const m = mapRegionForRotation(x0, y0, W0, H0, pageW, pageH, rot)
+    const { x, y, W, H } = clampRect(
+      m.x, m.y, m.W, m.H,
+      rot === 90 || rot === 270 ? pageH : pageW,
+      rot === 90 || rot === 270 ? pageW : pageH
+    )
+
+    const run = async (mode: 'layout' | 'raw') => {
+      const args = [
+        mode === 'layout' ? '-layout' : '-raw',
+        '-nopgbrk',
+        '-f', '1', '-l', '1',
+        '-x', String(x), '-y', String(y),
+        '-W', String(W), '-H', String(H),
+        pdfPath, '-'
+      ]
+      const { stdout } = await exec('pdftotext', args)
+      return (stdout || '').trim()
+    }
+
+    const layout = await run('layout')
+    const raw = await run('raw')
+
+    const score = (s: string) => {
+      const t = s.replace(/\s+/g, '')
+      const alnum = (t.match(/[A-Z0-9]/gi) || []).length
+      return (alnum / Math.max(1, t.length)) + Math.min(0.4, t.length / 200)
+    }
+    return score(raw) >= score(layout) ? raw : layout
   }
 
-  const layout = await run('layout')
-  const raw = await run('raw')
+  const outputs = await Promise.all(candidates.map(runFor))
+  const pickIdx = outputs
+    .map((s, i) => {
+      const t = s.replace(/\s+/g, '')
+      const a = (t.match(/[A-Z0-9]/gi) || []).length
+      return { i, score: (a / Math.max(1, t.length)) + Math.min(0.4, t.length / 200) }
+    })
+    .sort((a, b) => b.score - a.score)[0]?.i ?? 0
 
-  const score = (s: string) => {
-    const t = s.replace(/\s+/g, '')
-    const alnum = (t.match(/[A-Z0-9]/gi) || []).length
-    return (alnum / Math.max(1, t.length)) + Math.min(0.4, t.length / 200)
-  }
-  return score(raw) >= score(layout) ? raw : layout
+  return outputs[pickIdx]
 }
+
 
 // Rasterize page to PNG, then normalize image so region % always match unrotated page-space
 async function rasterizeAndNormalize(pdfPath: string, outBase: string, dpi: number) {
@@ -126,6 +160,13 @@ async function cropPctFromPng(pngPath: string, region: Region) {
   const out = `${pngPath.replace(/\.png$/, '')}-${left}x${top}-${width}x${height}.png`
   await img.extract({ left, top, width, height }).toFile(out)
   return out
+}
+
+async function cropBothOrientations(pngPath: string, region: Region, rot: 0 | 90 | 180 | 270) {
+  const a = await cropPctFromPng(pngPath, region)
+  if (rot === 0) return [a, a]
+  const b = await cropPctFromPng(pngPath, invertPctRegionFromRotated(region, rot))
+  return [a, b]
 }
 
 async function ocrRotated(imgPath: string, angle: 0 | 90 | 270, opts?: { psm?: '6' | '7'; whitelist?: string }) {
@@ -270,7 +311,7 @@ export async function POST(req: Request, { params }: { params: { planId: string 
 
     // 1) Vector text first (with -raw fallback) — handles many vertical stacks
     const numberRegion = project?.ocrNumberRegion as Region | null
-    const titleRegion  = project?.ocrTitleRegion as Region | null
+    const titleRegion = project?.ocrTitleRegion as Region | null
 
     let numText = ''
     let titleText = ''
@@ -282,29 +323,37 @@ export async function POST(req: Request, { params }: { params: { planId: string 
         const txt = await pdftotextRegionBest(pdfPath, numberRegion)
         const tight = txt.split('\n').map(s => s.trim()).filter(Boolean).join(' ')
         if (tight) { numText = tight; usedNumberRegionText = true }
-      } catch {}
+      } catch { }
     }
     if (titleRegion) {
       try {
         const txt = await pdftotextRegionBest(pdfPath, titleRegion)
         const lines = txt.split('\n').map(s => s.trim()).filter(Boolean)
         if (lines.length) { titleText = lines.slice(0, 2).join(' '); usedTitleRegionText = true }
-      } catch {}
+      } catch { }
     }
 
     // 2) Rasterize only if still missing; normalize image so % regions are stable vs rotation
     let numberDebug: any = { variants: [] as any[], rotationsTried: [0, 90, 270] }
+
+    // Prepare backup vars regardless of whether we rasterize
+    let embeddedText = ''
+    let fullText = ''
+
     if (!numText || !titleText) {
       const dpi = project?.ocrDpi ?? 350
-      const { pngPath } = await rasterizeAndNormalize(pdfPath, outBase, dpi)
+      const { pngPath, rot: pageRot } = await rasterizeAndNormalize(pdfPath, outBase, dpi)
 
       // NUMBER: OCR fallback (rotate 0/90/270)
       if (!numText && numberRegion) {
         try {
-          const numCrop = await cropPctFromPng(pngPath, numberRegion)
-          const trials = await ocrNumberAnyOrientation(numCrop)
+          const [numCropA, numCropB] = await cropBothOrientations(pngPath, numberRegion, pageRot)
+          const trialsA = await ocrNumberAnyOrientation(numCropA)
+          const trialsB = await ocrNumberAnyOrientation(numCropB)
+          const trials = [...trialsA, ...trialsB]
           const scored = trials.map(t => ({ ...t, picked: pickSheetNumber(t.raw) || '' }))
-          const rank = (s: string) => s.replace(/[^A-Z0-9.-]/g, '').length + (/(?:\.|-)\d+$/.test(s) ? 1 : 0)
+          const rank = (s: string) =>
+            s.replace(/[^A-Z0-9.-]/g, '').length + (/(?:\.|-)\d+$/.test(s) ? 1 : 0)
           scored.sort((a, b) => (rank(b.picked) - rank(a.picked)) || (a.psm === '7' ? -1 : 1))
           numText = scored[0]?.picked || ''
           numberDebug.variants = scored
@@ -313,89 +362,92 @@ export async function POST(req: Request, { params }: { params: { planId: string 
         }
       }
 
-      // TITLE: OCR fallback with multi-rotation
+      // TITLE: OCR fallback with multi-rotation and dual-orientation crops
       if (!titleText && titleRegion) {
         try {
-          const titleCrop = await cropPctFromPng(pngPath, titleRegion)
-          const best = await ocrTitleAnyOrientation(titleCrop)
-          const lines = best.text.split('\n').map(s => s.trim()).filter(Boolean).filter(l => /^[A-Z0-9 .\-_/()]+$/.test(l))
+          const [titleCropA, titleCropB] = await cropBothOrientations(pngPath, titleRegion, pageRot)
+          const bestA = await ocrTitleAnyOrientation(titleCropA)
+          const bestB = await ocrTitleAnyOrientation(titleCropB)
+          const best = bestA.score >= bestB.score ? bestA : bestB
+          const lines = best.text
+            .split('\n')
+            .map(s => s.trim())
+            .filter(Boolean)
+            .filter(l => /^[A-Z0-9 .\-_/()]+$/.test(l))
           titleText = (lines.slice(0, 2).join(' ') || '').trim()
-        } catch {}
+        } catch { }
       }
+
+      // 3) Backup signals (rare)
+      try {
+        const { stdout } = await exec('pdftotext', ['-layout', '-f', '1', '-l', '1', pdfPath, '-'])
+        embeddedText = stdout || ''
+      } catch { }
+      if ((!numText && !titleText) && (!embeddedText || embeddedText.trim().length < 40)) {
+        const { stdout } = await exec('tesseract', [pngPath, 'stdout', '-l', 'eng', '--oem', '1', '--psm', '6'])
+        fullText = stdout || ''
+      }
+
+      // ---- Final selection + persist (always runs)
+      if (numText) numText = fixO0(numText)
+
+      let sheetNumber =
+        pickSheetNumber(numText) ||
+        pickSheetNumber(titleText) ||
+        pickSheetNumber(embeddedText) ||
+        pickSheetNumber(fullText)
+
+      if (sheetNumber) sheetNumber = fixO0(sheetNumber)
+
+      const title =
+        pickTitleFromRegion(titleText) ||
+        (!titleRegion ? (pickTitleFromRegion(embeddedText) || pickTitleFromRegion(fullText)) : undefined)
+
+      const disc = guessDiscipline(sheetNumber, title)
+
+      const combinedText = [numText, titleText, embeddedText || fullText].filter(Boolean).join('\n')
+      const confidence = Math.min(1, (combinedText.length / 2000) + (sheetNumber ? 0.25 : 0))
+
+      const updated = await prisma.planSheet.update({
+        where: { id: plan.id },
+        data: {
+          ocrStatus: 'DONE',
+          ocrSuggestedNumber: sheetNumber || undefined,
+          ocrSuggestedTitle: title || undefined,
+          ocrSuggestedDisc: disc,
+          ocrConfidence: confidence,
+          ocrRaw: {
+            lengths: {
+              numberRegion: (numText || '').length,
+              titleRegion: (titleText || '').length,
+              embedded: (embeddedText || '').length,
+              full: (fullText || '').length,
+            },
+            previewDpi: project?.ocrDpi ?? 350,
+          } as any,
+        },
+      })
+
+      return NextResponse.json({
+        ok: true,
+        suggestions: {
+          sheetNumber: updated.ocrSuggestedNumber,
+          title: updated.ocrSuggestedTitle,
+          discipline: updated.ocrSuggestedDisc,
+          confidence: updated.ocrConfidence,
+        },
+        debug: {
+          numberOCR: numberDebug,
+          usedNumberRegionText,
+          usedTitleRegionText,
+        },
+      })
+
+    } catch (err) {
+      console.error('OCR error:', err)
+      await prisma.planSheet.update({ where: { id: plan.id }, data: { ocrStatus: 'FAILED' } })
+      return NextResponse.json({ error: 'OCR failed' }, { status: 500 })
+    } finally {
+      await rm(tmp, { recursive: true, force: true })
     }
-
-    // 3) Backup signals (rare)
-    let embeddedText = ''
-    try {
-      const { stdout } = await exec('pdftotext', ['-layout', '-f', '1', '-l', '1', pdfPath, '-'])
-      embeddedText = stdout || ''
-    } catch {}
-
-    let fullText = ''
-    if ((!numText && !titleText) && (!embeddedText || embeddedText.trim().length < 40)) {
-      const { stdout } = await exec('tesseract', [ `${outBase}.png`, 'stdout', '-l', 'eng', '--oem', '1', '--psm', '6'])
-      fullText = stdout || ''
-    }
-
-    if (numText) numText = fixO0(numText)
-
-    let sheetNumber =
-      pickSheetNumber(numText) ||
-      pickSheetNumber(titleText) ||
-      pickSheetNumber(embeddedText) ||
-      pickSheetNumber(fullText)
-
-    if (sheetNumber) sheetNumber = fixO0(sheetNumber)
-
-    const title =
-      pickTitleFromRegion(titleText) ||
-      pickTitleFromRegion(embeddedText) ||
-      pickTitleFromRegion(fullText)
-
-    const disc = guessDiscipline(sheetNumber, title)
-
-    const combinedText = [numText, titleText, embeddedText || fullText].filter(Boolean).join('\n')
-    const confidence = Math.min(1, (combinedText.length / 2000) + (sheetNumber ? 0.25 : 0))
-
-    const updated = await prisma.planSheet.update({
-      where: { id: plan.id },
-      data: {
-        ocrStatus: 'DONE',
-        ocrSuggestedNumber: sheetNumber || undefined,
-        ocrSuggestedTitle: title || undefined,
-        ocrSuggestedDisc: disc,
-        ocrConfidence: confidence,
-        ocrRaw: {
-          lengths: {
-            numberRegion: (numText || '').length,
-            titleRegion: (titleText || '').length,
-            embedded: (embeddedText || '').length,
-            full: (fullText || '').length,
-          },
-          previewDpi: project?.ocrDpi ?? 350,
-        } as any,
-      },
-    })
-
-    return NextResponse.json({
-      ok: true,
-      suggestions: {
-        sheetNumber: updated.ocrSuggestedNumber,
-        title: updated.ocrSuggestedTitle,
-        discipline: updated.ocrSuggestedDisc,
-        confidence: updated.ocrConfidence,
-      },
-      debug: {
-        numberOCR: numberDebug,
-        usedNumberRegionText,
-        usedTitleRegionText,
-      },
-    })
-  } catch (err) {
-    console.error('OCR error:', err)
-    await prisma.planSheet.update({ where: { id: plan.id }, data: { ocrStatus: 'FAILED' } })
-    return NextResponse.json({ error: 'OCR failed' }, { status: 500 })
-  } finally {
-    await rm(tmp, { recursive: true, force: true })
   }
-}
