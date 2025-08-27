@@ -442,6 +442,67 @@ export async function POST(req: Request, { params }: { params: { planId: string 
           usedTitleRegionText,
         },
       })
+    }
+
+    // If vector extraction already produced text, finalize and return
+    if (numText || titleText) {
+      let embeddedText = ''
+      try {
+        const { stdout } = await exec('pdftotext', ['-layout', '-f', '1', '-l', '1', pdfPath, '-'])
+        embeddedText = stdout || ''
+      } catch {}
+
+      if (numText) numText = fixO0(numText)
+      let sheetNumber =
+        pickSheetNumber(numText) ||
+        pickSheetNumber(titleText) ||
+        pickSheetNumber(embeddedText)
+      if (sheetNumber) sheetNumber = fixO0(sheetNumber)
+
+      const title =
+        pickTitleFromRegion(titleText) ||
+        (!titleRegion ? pickTitleFromRegion(embeddedText) : undefined)
+
+      const disc = guessDiscipline(sheetNumber, title)
+      const combinedText = [numText, titleText, embeddedText].filter(Boolean).join('
+')
+      const confidence = Math.min(1, (combinedText.length / 2000) + (sheetNumber ? 0.25 : 0))
+
+      const updated = await prisma.planSheet.update({
+        where: { id: plan.id },
+        data: {
+          ocrStatus: 'DONE',
+          ocrSuggestedNumber: sheetNumber || undefined,
+          ocrSuggestedTitle: title || undefined,
+          ocrSuggestedDisc: disc,
+          ocrConfidence: confidence,
+          ocrRaw: {
+            lengths: {
+              numberRegion: (numText || '').length,
+              titleRegion: (titleText || '').length,
+              embedded: (embeddedText || '').length,
+              full: 0,
+            },
+            previewDpi: project?.ocrDpi ?? 350,
+          } as any,
+        },
+      })
+
+      return NextResponse.json({
+        ok: true,
+        suggestions: {
+          sheetNumber: updated.ocrSuggestedNumber,
+          title: updated.ocrSuggestedTitle,
+          discipline: updated.ocrSuggestedDisc,
+          confidence: updated.ocrConfidence,
+        },
+        debug: {
+          numberOCR: numberDebug,
+          usedNumberRegionText,
+          usedTitleRegionText,
+        },
+      })
+    }
 
     } catch (err) {
       console.error('OCR error:', err)
